@@ -53,7 +53,8 @@ import type {
 function resizeTextarea(element: HTMLTextAreaElement | null) {
   if (!element) return;
   element.style.height = "auto";
-  element.style.height = `${element.scrollHeight}px`;
+  // scrollHeight 不含边框，border-box 高度需要补上这部分。
+  element.style.height = `${element.scrollHeight + element.offsetHeight - element.clientHeight}px`;
 }
 
 function EditableImage({
@@ -137,6 +138,7 @@ export function RecordEditor({
     defaultValues: {
       time: formatDateTimeInput(new Date()),
       type: "",
+      name: "",
       description: "",
     },
   });
@@ -162,6 +164,7 @@ export function RecordEditor({
     reset({
       time: formatDateTimeInput(record?.time ?? new Date()),
       type: record?.type ?? initialType ?? "",
+      name: record?.name ?? "",
       description: record?.description ?? "",
     });
     setRows(attributesToRows(record?.attributes ?? {}, template));
@@ -246,6 +249,7 @@ export function RecordEditor({
       id: record?.id ?? ulid(),
       time,
       type: values.type.trim(),
+      name: values.name.trim(),
       description: values.description.trim(),
       images: imageIds,
       attributes: rowsToAttributes(rows),
@@ -349,7 +353,6 @@ export function RecordEditor({
                 <Drawer.Title textStyle="lg">{title}</Drawer.Title>
                 <Button
                   type="button"
-                  size="sm"
                   variant="plain"
                   disabled={closing || isSubmitting || recordDeleting}
                   onClick={() => void handleClose()}
@@ -402,10 +405,15 @@ export function RecordEditor({
                   />
                 </Field.Root>
                 <Field.Root>
+                  <Field.Label textStyle="sm">名称</Field.Label>
+                  <Input {...register("name")} />
+                </Field.Root>
+                <Field.Root>
                   <Field.Label textStyle="sm">描述</Field.Label>
                   <Textarea
                     {...descriptionField}
                     rows={1}
+                    minH="10"
                     resize="none"
                     overflow="hidden"
                     ref={(element) => {
@@ -424,7 +432,6 @@ export function RecordEditor({
                     </Text>
                     <Button
                       type="button"
-                      size="sm"
                       variant="subtle"
                       onClick={() => setAttributeTypeOpen(true)}
                     >
@@ -440,7 +447,6 @@ export function RecordEditor({
                         width="full"
                       >
                         <Input
-                          size="sm"
                           width="20"
                           flexShrink="0"
                           readOnly={row.locked}
@@ -464,7 +470,6 @@ export function RecordEditor({
                         />
                         <Button
                           type="button"
-                          size="sm"
                           variant="ghost"
                           flexShrink="0"
                           aria-label="删除属性"
@@ -485,7 +490,6 @@ export function RecordEditor({
                     </Text>
                     <Button
                       type="button"
-                      size="sm"
                       variant="subtle"
                       disabled={imageUploading}
                       onClick={() => imageInputRef.current?.click()}

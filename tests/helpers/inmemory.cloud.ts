@@ -15,6 +15,13 @@ export class InMemoryCloud implements CloudAdapter {
   /** 测试失败注入：为 true 时 putManifest 抛错（模拟 manifest 提交失败）。 */
   failPutManifest = false
 
+  async clearAllData(): Promise<void> {
+    this.partitions.clear()
+    this.images.clear()
+    this.typeTemplates = undefined
+    this.manifest = undefined
+  }
+
   async getManifest(): Promise<Manifest | undefined> {
     return this.manifest
   }

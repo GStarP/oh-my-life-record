@@ -24,6 +24,7 @@ function isRecordJson(value: unknown): value is RecordJson {
     typeof record.time === 'string' &&
     !Number.isNaN(new Date(record.time).getTime()) &&
     typeof record.type === 'string' &&
+    typeof record.name === 'string' &&
     typeof record.description === 'string' &&
     Array.isArray(record.images) &&
     typeof record.attributes === 'object' &&
@@ -71,7 +72,7 @@ export function decodePartitionFile(text: string): PartitionFile {
       throw new Error(
         '第 ' +
           index +
-          ' 条记录结构不合法（id/time/type/description/images/attributes 类型或取值不符）',
+          ' 条记录结构不合法（id/time/type/name/description/images/attributes 类型或取值不符）',
       )
     }
     records.push({ ...record, time: new Date(record.time) })

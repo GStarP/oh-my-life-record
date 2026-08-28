@@ -24,6 +24,36 @@ export function defineStorageAdapterContract(
   createStorage: () => StorageAdapter,
 ): void {
   describe(`${name}: StorageAdapter 契约`, () => {
+    it('清空全部业务数据与同步状态后，可以从零重新记录', async () => {
+      // 手机清空不能只删列表：暂存图片、模板和两类同步状态都必须清除，
+      // 否则旧图片占空间或新数据沿用旧 revision。保留数据库结构后应仍能
+      // 正常写入和按时间查询，新分片从 remoteRevision=0 开始；重复清空也应成功。
+      const storage = createStorage()
+      await storage.upsertRecordAndMarkDirty(
+        recordFixture('old', '2026-08-14T10:00:00+08:00'),
+        ['2026-08'],
+      )
+      await storage.putImageBlob('old-image', new Blob(['old image']))
+      await storage.putTypeTemplateAndMarkDirty({ type: '旧模板', icon: 'wallet', attributes: [] })
+      await storage.putPartitionState({ month: '2026-08', remoteRevision: 9, dirty: true })
+      await storage.putTypeTemplateState({ remoteRevision: 4, dirty: true })
+
+      await storage.clearAllData()
+      await storage.clearAllData()
+      await expect(storage.getAllRecords()).resolves.toEqual([])
+      await expect(storage.getStagedImages()).resolves.toEqual([])
+      await expect(storage.getAllPartitionStates()).resolves.toEqual([])
+      await expect(storage.getTypeTemplates()).resolves.toEqual([])
+      await expect(storage.getTypeTemplateState()).resolves.toBeUndefined()
+
+      const fresh = recordFixture('new', '2026-08-14T11:00:00+08:00', { name: '重新开始' })
+      await storage.upsertRecordAndMarkDirty(fresh, ['2026-08'])
+      await expect(storage.getRecordsInMonth('2026-08')).resolves.toEqual([fresh])
+      await expect(storage.getPartitionState('2026-08')).resolves.toEqual({
+        month: '2026-08', remoteRevision: 0, dirty: true,
+      })
+    })
+
     it('按 UTC+8 月份读取记录，并保持时间与同刻 ID 的确定性顺序', async () => {
       // 月份读取是列表加载和生成月度云端快照的共同基础；同一时刻的记录
       // 也必须保持固定顺序，否则内存替身与真实 IndexedDB 会产生不同快照。
@@ -71,17 +101,26 @@ export function defineStorageAdapterContract(
     it('原子记录操作会同时写入记录和 dirty 状态', async () => {
       // 记录内容与 dirty 是一个业务事实：调用方不能观察到“记录已改但不会
       // 同步”的中间状态，所以两个操作必须通过同一公开方法完成。
+      // 名称与长描述必须独立保留；仅修改名称后，两个读取入口仍应返回完整描述。
       const storage = createStorage()
       await storage.putPartitionState({
         month: '2026-08',
         remoteRevision: 4,
         dirty: false,
       })
-      const record = recordFixture('atomic', '2026-08-14T10:00:00+08:00')
+      const record = recordFixture('atomic', '2026-08-14T10:00:00+08:00', {
+        name: '读完一本书',
+        description: '第一段\n\n' + '完整正文。'.repeat(100) + '\n最后一段',
+      })
 
       await storage.upsertRecordAndMarkDirty(record, ['2026-08'])
       expect(await storage.getRecordsInMonth('2026-08')).toEqual([record])
       expect((await storage.getPartitionState('2026-08'))?.dirty).toBe(true)
+
+      const renamed = { ...record, name: '读书笔记' }
+      await storage.upsertRecordAndMarkDirty(renamed, ['2026-08'])
+      await expect(storage.getRecordsInMonth('2026-08')).resolves.toEqual([renamed])
+      await expect(storage.getAllRecords()).resolves.toEqual([renamed])
 
       await storage.deleteRecordAndMarkDirty(record.id, '2026-08')
       expect(await storage.getRecordsInMonth('2026-08')).toEqual([])

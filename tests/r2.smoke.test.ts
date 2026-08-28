@@ -49,7 +49,7 @@ const FAKE_MONTH = '2999-12'
 const imageId = 'smoke-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8)
 
 function rec(id: string, time: string): LifeRecord {
-  return { id, time: new Date(time), type: '冒烟', description: '真实 R2 冒烟测试数据', images: [imageId], attributes: {} }
+  return { id, time: new Date(time), type: '冒烟', name: 'R2 冒烟测试', description: '真实 R2 冒烟测试数据', images: [imageId], attributes: {} }
 }
 
 // 直接操作 S3 的原始客户端：仅用于清理现场（接口之外的键），不进契约

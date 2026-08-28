@@ -18,7 +18,6 @@ export function AttributeValueInput({ row, onChange }: AttributeValueInputProps)
     const value = typeof row.value === 'string' ? row.value : String(row.value)
     return (
       <Combobox.Root
-        size="sm"
         collection={collection}
         value={value ? [value] : []}
         inputValue={value}
@@ -58,7 +57,6 @@ export function AttributeValueInput({ row, onChange }: AttributeValueInputProps)
   if (row.valueType === 'text') {
     return (
       <Input
-        size="sm"
         flex="1"
         minW="0"
         value={String(row.value)}
@@ -70,7 +68,6 @@ export function AttributeValueInput({ row, onChange }: AttributeValueInputProps)
   if (row.valueType === 'number') {
     return (
       <Input
-        size="sm"
         flex="1"
         minW="0"
         type="number"

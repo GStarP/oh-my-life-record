@@ -16,6 +16,9 @@ export type R2Config = {
 }
 
 export interface CloudAdapter {
+  /** 清空本应用的云端对象，保留桶与无关对象；失败可能已部分删除，可重试。 */
+  clearAllData(): Promise<void>
+
   // ---- manifest ----
   getManifest(): Promise<Manifest | undefined>
   putManifest(manifest: Manifest): Promise<void>

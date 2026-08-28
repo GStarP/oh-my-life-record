@@ -11,10 +11,18 @@ import {
   hasCredential,
 } from '../features/cloud/credential/credential'
 import { createImageManager } from '../features/records/images/image-manager'
+import { clearImageCache } from '../features/records/images/image-pipeline'
 import type { ImageManager } from '../features/records/images/image-manager.type'
 
 /** 本地存储单例（生产数据库名）。 */
 export const storage = new IndexedDbStorage('omlr')
+
+/** 清空云端、本机数据及图片缓存；可重复执行，完成后由设置页刷新。 */
+export async function clearAllData(config: R2Config): Promise<void> {
+  await new R2CloudAdapter(config).clearAllData()
+  await clearImageCache()
+  await storage.clearAllData()
+}
 
 let cachedCredential: R2Config | undefined
 let cachedCloud: R2CloudAdapter | undefined

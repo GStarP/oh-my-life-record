@@ -32,6 +32,14 @@ export class InMemoryStorage implements StorageAdapter {
   private typeTemplates = new Map<string, RecordTypeTemplate>()
   private typeTemplateState: TypeTemplateState | undefined
 
+  async clearAllData(): Promise<void> {
+    this.records.clear()
+    this.images.clear()
+    this.states.clear()
+    this.typeTemplates.clear()
+    this.typeTemplateState = undefined
+  }
+
   /** 仅供测试建立前置数据；生产 StorageAdapter 不暴露绕过 dirty 的写入口。 */
   async upsertRecord(record: LifeRecord): Promise<void> {
     this.records.set(record.id, record)

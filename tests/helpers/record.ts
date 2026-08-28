@@ -10,6 +10,7 @@ export function recordFixture(
     id,
     time: new Date(time),
     type: '测试',
+    name: '',
     description: '',
     images: [],
     attributes: {},

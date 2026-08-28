@@ -54,7 +54,7 @@ const TYPE_TEMPLATE_ICON_COMPONENTS: TypeTemplateIconComponentMap = {
 }
 
 export function getTypeTemplateIcon(value: TypeTemplateDisplayIcon | undefined) {
-  // “不使用模板”是界面选项，不是可持久化的模板 icon；它复用同一渲染
+  // “自由”是界面选项，不是可持久化的模板 icon；它复用同一渲染
   // 入口，但不进入领域图标注册表和模板选择器。
   if (value === 'scroll') return LuScroll
   return TYPE_TEMPLATE_ICON_COMPONENTS[value ?? DEFAULT_TYPE_TEMPLATE_ICON]

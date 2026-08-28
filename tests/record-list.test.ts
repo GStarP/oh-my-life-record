@@ -15,6 +15,7 @@ function record(id: string, time: string): LifeRecord {
     id,
     time: new Date(time),
     type: '日常',
+    name: '',
     description: id,
     images: [],
     attributes: {},

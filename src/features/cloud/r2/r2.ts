@@ -39,6 +39,13 @@ import {
 /** 签名 GET URL 的有效期（秒）。图片展示用：「短期」= 5 分钟（R2 默认 86400 太长）。 */
 const SIGNED_URL_EXPIRES_SECONDS = 300
 
+/** ListObjectsV2 的 token 是 XML 文本；对象键另由 encoding-type=url 编码。 */
+function decodeXmlText(text: string): string {
+  return text.replace(/&(amp|lt|gt|quot|apos);/g, (_, entity: string) => {
+    return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" })[entity] ?? _
+  })
+}
+
 /**
  * R2 请求失败（非 404，或写路径 404）：携带 HTTP 状态码，
  * 供调用方分类处置（如凭证连接验证区分「凭证无效」与「云端/网络故障」，见 verify.ts）。
@@ -186,41 +193,65 @@ export class R2CloudAdapter implements CloudAdapter {
     await this.signedRequest('DELETE', this.imageKey(imageId))
   }
 
-  /** 列出云端全部图片对象 ID（ListObjectsV2，prefix=images/，自动翻页）。 */
-  async listImages(): Promise<string[]> {
-    const ids: string[] = []
+  /** 列出指定前缀的全部对象，自动翻页。 */
+  private async listObjectKeys(prefix: string): Promise<string[]> {
+    const keys: string[] = []
     let continuationToken: string | undefined
     for (;;) {
       const url = new URL(this.baseUrl)
       url.searchParams.set('list-type', '2')
-      url.searchParams.set('prefix', 'images/')
+      url.searchParams.set('prefix', prefix)
+      url.searchParams.set('encoding-type', 'url')
       if (continuationToken) url.searchParams.set('continuation-token', continuationToken)
       const res = await this.client.fetch(url.toString(), { method: 'GET' })
       if (!res.ok) {
         const detail = await res.text().catch(() => '')
         const code = /<Code>([^<]+)<\/Code>/.exec(detail)?.[1]
         throw new R2HttpError(
-          'R2 列出图片失败（HTTP ' + res.status + '）：' + detail.slice(0, 200),
+          'R2 列出对象失败（HTTP ' + res.status + '）：' + detail.slice(0, 200),
           res.status,
           code,
         )
       }
       const xml = await res.text()
-      // 响应为 XML（ListBucketResult），只需取 Contents 的 Key
-      for (const m of xml.matchAll(/<Key>([^<]+)<\/Key>/g)) {
-        const key = m[1]
-        if (!key.startsWith('images/')) continue
-        const id = key.endsWith('.webp')
-          ? key.slice('images/'.length, -'.webp'.length)
-          : key.slice('images/'.length)
-        ids.push(id)
+      if (!/<ListBucketResult\b[^>]*>[\s\S]*<\/ListBucketResult>\s*$/.test(xml)) {
+        throw new Error('R2 对象清单无效')
+      }
+      for (const encodedKey of xml.matchAll(/<Key>([^<]+)<\/Key>/g)) {
+        const key = decodeURIComponent(decodeXmlText(encodedKey[1]))
+        if (!key.startsWith(prefix) || key.split('/').some((part) => part === '.' || part === '..')) {
+          throw new Error('R2 对象路径超出清理范围，已停止操作')
+        }
+        keys.push(key)
       }
       if (!/<IsTruncated>true<\/IsTruncated>/.test(xml)) break
       const token = /<NextContinuationToken>([^<]+)<\/NextContinuationToken>/.exec(xml)
-      if (!token) break // 防御：声称截断却无续传令牌，避免死循环
-      continuationToken = token[1]
+      const nextToken = token ? decodeXmlText(token[1]) : undefined
+      if (!nextToken || nextToken === continuationToken) {
+        throw new Error('R2 对象清单分页失败')
+      }
+      continuationToken = nextToken
     }
-    return ids
+    return keys
+  }
+
+  /** 列出云端全部图片对象 ID（ListObjectsV2，prefix=images/，自动翻页）。 */
+  async listImages(): Promise<string[]> {
+    return (await this.listObjectKeys('images/')).map((key) => key.endsWith('.webp')
+      ? key.slice('images/'.length, -'.webp'.length)
+      : key.slice('images/'.length))
+  }
+
+  async clearAllData(): Promise<void> {
+    // 不读取 manifest 或解析旧记录；即使旧 JSON 已过时/损坏，也能清空。
+    // 先完整列举再删除，避免边翻页边删除导致遗漏；未被 manifest 引用的文件也覆盖。
+    const [records, images] = await Promise.all([
+      this.listObjectKeys('records/'),
+      this.listObjectKeys('images/'),
+    ])
+    for (const key of [...records, ...images, 'type-templates.json', 'manifest.json']) {
+      await this.signedRequest('DELETE', key.split('/').map(encodeURIComponent).join('/'))
+    }
   }
 
   // ---- 签名 URL ----

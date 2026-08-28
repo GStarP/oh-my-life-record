@@ -521,7 +521,6 @@ export function RecordsPage() {
             startElement={<Icon as={LuSearch} boxSize="4" />}
           >
             <Input
-              size="sm"
               aria-label="筛选类型"
               variant="subtle"
               bg="bg.panel"
@@ -548,8 +547,9 @@ export function RecordsPage() {
             />
           </InputGroup>
           <Button
-            size="sm"
             variant="subtle"
+            w="24"
+            flexShrink={0}
             aria-label={syncStatus.label}
             aria-busy={syncBusy}
             disabled={syncBusy || !isOnline || !configured}
@@ -579,7 +579,7 @@ export function RecordsPage() {
       ) : items.length === 0 && !nextMonth ? (
         <Flex flex="1" align="center" justify="center" px="xl">
           <Text textStyle="sm" color="fg.muted">
-            {filter ? '没有匹配的记录。' : '还没有记录，点击右下角开始记录。'}
+            {filter ? '没有匹配的记录。' : '暂无记录'}
           </Text>
         </Flex>
       ) : (
@@ -631,7 +631,6 @@ export function RecordsPage() {
               <Text textStyle="sm" color="fg.error">加载更早记录失败</Text>
               <Button
                 type="button"
-                size="sm"
                 variant="subtle"
                 onClick={() => void loadOlderMonth()}
               >

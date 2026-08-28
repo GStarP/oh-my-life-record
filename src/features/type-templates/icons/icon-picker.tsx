@@ -19,11 +19,6 @@ export function TypeTemplateIconPicker({
       <IconButton
         type="button"
         aria-label="选择图标"
-        size="md"
-        width="2.5rem"
-        height="2.5rem"
-        minH="0"
-        aspectRatio="1"
         variant="subtle"
         disabled={disabled}
         onClick={() => setOpen(true)}
@@ -54,7 +49,6 @@ export function TypeTemplateIconPicker({
                     type="button"
                     aria-label={option.label}
                     aria-pressed={value === option.value}
-                    size="lg"
                     width="full"
                     height="auto"
                     minH="0"

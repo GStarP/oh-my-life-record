@@ -135,6 +135,14 @@ export class IndexedDbStorage implements StorageAdapter {
     this.db = openDatabase(dbName)
   }
 
+  async clearAllData(): Promise<void> {
+    const db = await this.db
+    const stores = Array.from(db.objectStoreNames)
+    const tx = db.transaction(stores, 'readwrite')
+    for (const store of stores) tx.objectStore(store).clear()
+    await transactionDone(tx)
+  }
+
   // ---- 记录 ----
 
   async upsertRecordAndMarkDirty(

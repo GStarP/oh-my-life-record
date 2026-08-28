@@ -27,6 +27,9 @@ export type StagedImageEntry = {
 
 /** 图片 Blob 暂存：本地仅存放「尚未成功上传」的图片（见 ADR-0004/0005）。 */
 export interface StorageAdapter {
+  /** 原子清空全部本地业务数据及同步状态；保留数据库结构，不产生待上传修改。 */
+  clearAllData(): Promise<void>
+
   // ---- 记录 ----
   /** 原子写入记录并把指定月份标记为 dirty（记录页 CRUD 使用）。 */
   upsertRecordAndMarkDirty(record: LifeRecord, dirtyMonths: string[]): Promise<void>

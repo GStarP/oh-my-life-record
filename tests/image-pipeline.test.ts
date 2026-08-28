@@ -1,6 +1,6 @@
 /** 图片来源解析与本地暂存清理测试。 */
 import { describe, expect, it, vi } from 'vitest'
-import { loadImageSource } from '../src/features/records/images/image-pipeline'
+import { clearImageCache, loadImageSource } from '../src/features/records/images/image-pipeline'
 import { cleanupLocalOrphanImages } from '../src/features/records/images/image-staging'
 import { InMemoryStorage } from './helpers/inmemory.storage'
 import { InMemoryCloud } from './helpers/inmemory.cloud'
@@ -13,6 +13,7 @@ function recordWithImages(id: string, images: string[]): LifeRecord {
     id,
     time: new Date('2026-08-16T10:00:00+08:00'),
     type: '测试',
+    name: '',
     description: '',
     images,
     attributes: {},
@@ -48,11 +49,13 @@ describe('cleanupLocalOrphanImages：本地图片暂存清理', () => {
     expect(await storage.getImageBlob('recent-orphan')).toBeDefined()
   })
 
-  it('云端图片首次读取写入 Cache Storage，刷新后从稳定对象路径命中缓存', async () => {
+  it('云端图片复用稳定缓存；清空图片缓存后重新下载，不影响应用缓存', async () => {
     // presigned URL 的签名查询参数每次都会变化，不能直接依赖普通 HTTP URL 缓存；
     // 图片管线必须用不含签名参数的稳定对象路径作为 Cache Storage key，
     // 这样第二次加载无需再次下载图片，同时仍不把已上传图片写入 IndexedDB。
+    // 本机清空只应删除图片缓存，不能误删应用静态缓存；清空后相同图片必须重新下载。
     const entries = new Map<string, Response>()
+    const cacheNames = new Set(['omlr-images-v1', 'app-shell'])
     const keyOf = (request: RequestInfo | URL) =>
       request instanceof Request ? request.url : String(request)
     const cache = {
@@ -64,6 +67,10 @@ describe('cleanupLocalOrphanImages：本地图片暂存清理', () => {
     } as unknown as Cache
     const cacheStorage = {
       open: async () => cache,
+      delete: async (name: string) => {
+        if (name === 'omlr-images-v1') entries.clear()
+        return cacheNames.delete(name)
+      },
     } as unknown as CacheStorage
     const cachesDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'caches')
     const originalFetch = globalThis.fetch
@@ -101,6 +108,12 @@ describe('cleanupLocalOrphanImages：本地图片暂存清理', () => {
       expect(second.kind).toBe('ready')
       expect(fetchMock).toHaveBeenCalledTimes(1)
       expect(entries.size).toBe(1)
+
+      await clearImageCache()
+      expect(entries.size).toBe(0)
+      expect(cacheNames).toEqual(new Set(['app-shell']))
+      await loadImageSource(new InMemoryStorage(), cloud, 'image-1')
+      expect(fetchMock).toHaveBeenCalledTimes(2)
     } finally {
       createObjectUrl.mockRestore()
       globalThis.fetch = originalFetch

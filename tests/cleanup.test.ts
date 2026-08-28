@@ -12,7 +12,7 @@ import { InMemoryCloud } from './helpers/inmemory.cloud'
 import type { LifeRecord } from '../src/features/records/type'
 
 function rec(id: string, images: string[]): LifeRecord {
-  return { id, time: new Date('2026-08-01T10:00:00+08:00'), type: '测试', description: '', images, attributes: {} }
+  return { id, time: new Date('2026-08-01T10:00:00+08:00'), type: '测试', name: '', description: '', images, attributes: {} }
 }
 
 describe('cleanupCloudImages：只删无引用孤儿', () => {

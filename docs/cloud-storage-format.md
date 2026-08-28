@@ -67,7 +67,8 @@ images/{imageId}.webp
       "id": "01JEXAMPLE0000000000000000",
       "time": "2026-08-17T08:30:00.000Z",
       "type": "阅读",
-      "description": "读完一本书",
+      "name": "读完一本书",
+      "description": "读后感第一段。\n\n第二段保留完整正文。",
       "images": ["01JIMAGE000000000000000000"],
       "attributes": {
         "页数": 320,
@@ -90,9 +91,12 @@ images/{imageId}.webp
 - `id`：记录唯一 ID。
 - `time`：ISO 8601 时间字符串，上传时为 UTC 时间。
 - `type`：记录类型字符串；自由记录可以为空字符串。
+- `name`：简短名称字符串，未填写时为 `""`。字段必填；缺失或非字符串均视为损坏。
 - `description`：描述字符串，无描述时为 `""`。
 - `images`：图片 ID 数组，无图片时为 `[]`。
 - `attributes`：自定义属性对象，值只能是字符串、数值或布尔值；文本或数值属性为空时不写入，布尔属性始终写入；无属性时为 `{}`。
+
+仅接受当前格式，不迁移旧记录（见 [ADR-0005](adr/0005-indexeddb-local-storage.md)）。
 
 ### `images/{imageId}.webp`
 

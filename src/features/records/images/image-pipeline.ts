@@ -10,6 +10,11 @@ import type { ImageSource } from './image-pipeline.type'
 
 const IMAGE_CACHE_NAME = 'omlr-images-v1'
 
+/** 只清理记录图片缓存，不清除应用静态资源或浏览器其他缓存。失败交给调用方报告。 */
+export async function clearImageCache(): Promise<void> {
+  if (typeof caches !== 'undefined') await caches.delete(IMAGE_CACHE_NAME)
+}
+
 function cacheKeyForSignedUrl(signedUrl: string): Request | undefined {
   try {
     const url = new URL(signedUrl)

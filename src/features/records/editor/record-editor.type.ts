@@ -7,6 +7,7 @@ import type { StagedImagePreview } from '../images/image-staging.type'
 export type RecordEditorValues = {
   time: string
   type: string
+  name: string
   description: string
 }
 

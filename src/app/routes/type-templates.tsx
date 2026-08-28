@@ -114,7 +114,6 @@ export function TypeTemplatesPage() {
       <Flex direction="column" gap="lg">
         <Grid templateColumns="1fr auto 1fr" alignItems="center" width="full">
           <IconButton
-            size="md"
             variant="plain"
             aria-label="返回设置"
             justifySelf="start"
@@ -126,7 +125,6 @@ export function TypeTemplatesPage() {
             类型模板
           </Text>
           <Button
-            size="sm"
             variant="subtle"
             justifySelf="end"
             onClick={openNew}

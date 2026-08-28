@@ -28,7 +28,7 @@ export function TypeTemplatePicker({
             <Grid templateColumns="repeat(4, minmax(0, 1fr))" gap="sm">
               <TypeTemplateTile
                 icon="scroll"
-                label="不使用模板"
+                label="自由"
                 surface="sheet"
                 onClick={() => onSelect(undefined)}
               />

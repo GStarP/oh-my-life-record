@@ -137,10 +137,21 @@ export function RecordCard({ record, onOpen, imageManager }: RecordCardProps) {
             </Text>
           </Flex>
 
-          {record.description.trim() && (
+          {record.name?.trim() && (
             <Text
               textStyle="sm"
               color="fg"
+              whiteSpace="pre-wrap"
+              overflowWrap="anywhere"
+            >
+              {record.name}
+            </Text>
+          )}
+
+          {record.description.trim() && (
+            <Text
+              textStyle="sm"
+              color="fg.muted"
               whiteSpace="pre-wrap"
               overflowWrap="anywhere"
             >

@@ -144,7 +144,6 @@ export function TypeTemplateEditor({
                 </Drawer.Title>
                 <Button
                   variant="plain"
-                  size="sm"
                   disabled={saving || deleting}
                   onClick={onClose}
                 >
@@ -188,7 +187,6 @@ export function TypeTemplateEditor({
                       预置属性
                     </Text>
                     <Button
-                      size="sm"
                       variant="subtle"
                       onClick={() =>
                         setAttributes((current) => [
@@ -213,7 +211,7 @@ export function TypeTemplateEditor({
                         gap="xs"
                         alignItems="center"
                       >
-                        <NativeSelect.Root size="sm" width="full">
+                        <NativeSelect.Root width="full">
                           <NativeSelect.Field
                             aria-label="属性类型"
                             value={attribute.kind}
@@ -233,7 +231,6 @@ export function TypeTemplateEditor({
                           <NativeSelect.Indicator />
                         </NativeSelect.Root>
                         <Input
-                          size="sm"
                           minW="0"
                           value={attribute.name}
                           onChange={(event) =>
@@ -245,7 +242,6 @@ export function TypeTemplateEditor({
                         />
                         <Button
                           type="button"
-                          size="sm"
                           variant="ghost"
                           aria-label="删除预置属性"
                           onClick={() =>
@@ -260,7 +256,6 @@ export function TypeTemplateEditor({
                           <TagsInput.Root
                             gridColumn="1 / span 2"
                             mt="xs"
-                            size="sm"
                             width="full"
                             value={attribute.options}
                             allowDuplicates={false}
