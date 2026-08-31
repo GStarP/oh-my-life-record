@@ -6,6 +6,7 @@
  */
 import {
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -112,6 +113,7 @@ export function RecordEditor({
   onSaved,
   onDeleted,
 }: RecordEditorProps) {
+  const formId = useId();
   const [rows, setRows] = useState<AttributeRow[]>([]);
   const [imageIds, setImageIds] = useState<string[]>([]);
   const [imageUploading, setImageUploading] = useState(false);
@@ -236,9 +238,14 @@ export function RecordEditor({
   }
 
   async function handleSave(values: RecordEditorValues) {
+    // 顶部按钮与键盘提交共用此入口；取消或提交已经开始时不能重复写入。
+    if (
+      closing || recordDeleting || committingRef.current || committedRef.current ||
+      !attributesValid
+    ) return;
     // 暂存图片是表单数据的一部分；若用户在压缩/写入 IndexedDB 完成前
     // 提交，imageIds 仍是旧快照，刚选中的图片会从记录中丢失。
-    if (imageUploading || imageUploadPromiseRef.current) return
+    if (imageUploading || imageUploadPromiseRef.current) return;
 
     const time = parseDateTimeInput(values.time);
     if (Number.isNaN(time.getTime())) {
@@ -270,7 +277,7 @@ export function RecordEditor({
   }
 
   async function handleClose() {
-    if (closing) return;
+    if (closing || isSubmitting || recordDeleting || committingRef.current) return;
     setClosing(true);
     // 取消动作先等当前批次落库，再做立即孤儿清理，
     // 避免「清理先结束、图片后写入」留下刚刚选中的孤儿 Blob。
@@ -330,15 +337,18 @@ export function RecordEditor({
   }
 
   const title = record ? "编辑记录" : "新建记录";
+  const busy = closing || isSubmitting || recordDeleting;
   return (
     <>
       <Drawer.Root
         open={open}
         placement="bottom"
         size="lg"
-        closeOnInteractOutside={false}
-        closeOnEscape={false}
-        onOpenChange={() => {}}
+        closeOnInteractOutside={!busy}
+        closeOnEscape={!busy}
+        onOpenChange={(event) => {
+          if (!event.open) void handleClose();
+        }}
       >
         <Drawer.Backdrop />
         <Drawer.Positioner>
@@ -346,219 +356,199 @@ export function RecordEditor({
             bg="bg.panel"
             borderTopRadius="2xl"
             maxH="90dvh"
-            aria-busy={closing}
+            aria-busy={busy}
           >
-              <Drawer.Header>
+            <Drawer.Header>
               <Flex align="center" justify="space-between" width="full">
                 <Drawer.Title textStyle="lg">{title}</Drawer.Title>
                 <Button
-                  type="button"
+                  type="submit"
+                  form={formId}
                   variant="plain"
-                  disabled={closing || isSubmitting || recordDeleting}
-                  onClick={() => void handleClose()}
+                  flexShrink={0}
+                  disabled={!isValid || !attributesValid || imageUploading || busy}
+                  loading={closing || isSubmitting}
+                  loadingText={closing ? "取消中" : "保存中"}
+                  aria-busy={closing || isSubmitting}
                 >
-                  {closing ? (
-                    <Flex align="center" gap="xs">
-                      <Spinner size="sm" />
-                      <Text textStyle="sm">清理中…</Text>
-                    </Flex>
-                  ) : (
-                    "取消"
-                  )}
+                  保存
                 </Button>
               </Flex>
             </Drawer.Header>
             <Drawer.Body
               overflowY="auto"
               pb="3xl"
-              pointerEvents={closing || recordDeleting ? "none" : "auto"}
+              pointerEvents={busy ? "none" : "auto"}
             >
               <Box
                 as="form"
+                id={formId}
                 display="flex"
                 flexDirection="column"
                 gap="lg"
                 onSubmit={handleSubmit(handleSave)}
               >
-                <Field.Root>
-                  <Field.Label textStyle="sm">时间</Field.Label>
-                  <Input
-                    type="datetime-local"
-                    {...register("time", { required: true })}
-                  />
-                </Field.Root>
-                <Field.Root>
-                  <Field.Label textStyle="sm">类型</Field.Label>
-                  <Input
-                    readOnly={template !== undefined}
-                    bg={template !== undefined ? "bg.muted" : undefined}
-                    {...register(
-                      "type",
-                      template
-                        ? {
-                            required: "请输入类型",
-                            validate: (value) =>
-                              value.trim().length > 0 || "请输入类型",
-                          }
-                        : {},
-                    )}
-                  />
-                </Field.Root>
-                <Field.Root>
-                  <Field.Label textStyle="sm">名称</Field.Label>
-                  <Input {...register("name")} />
-                </Field.Root>
-                <Field.Root>
-                  <Field.Label textStyle="sm">描述</Field.Label>
-                  <Textarea
-                    {...descriptionField}
-                    rows={1}
-                    minH="10"
-                    resize="none"
-                    overflow="hidden"
-                    ref={(element) => {
-                      descriptionField.ref(element);
-                      descriptionRef.current = element;
-                      resizeTextarea(element);
-                    }}
-                    onInput={(event) => resizeTextarea(event.currentTarget)}
-                  />
-                </Field.Root>
+                <fieldset disabled={busy} style={{ display: "contents" }}>
+                  <Field.Root>
+                    <Field.Label textStyle="sm">时间</Field.Label>
+                    <Input
+                      type="datetime-local"
+                      {...register("time", { required: true })}
+                    />
+                  </Field.Root>
+                  <Field.Root>
+                    <Field.Label textStyle="sm">类型</Field.Label>
+                    <Input
+                      readOnly={template !== undefined}
+                      bg={template !== undefined ? "bg.muted" : undefined}
+                      {...register(
+                        "type",
+                        template
+                          ? {
+                              required: "请输入类型",
+                              validate: (value) =>
+                                value.trim().length > 0 || "请输入类型",
+                            }
+                          : {},
+                      )}
+                    />
+                  </Field.Root>
+                  <Field.Root>
+                    <Field.Label textStyle="sm">名称</Field.Label>
+                    <Input {...register("name")} />
+                  </Field.Root>
+                  <Field.Root>
+                    <Field.Label textStyle="sm">描述</Field.Label>
+                    <Textarea
+                      {...descriptionField}
+                      rows={1}
+                      minH="10"
+                      resize="none"
+                      overflow="hidden"
+                      ref={(element) => {
+                        descriptionField.ref(element);
+                        descriptionRef.current = element;
+                        resizeTextarea(element);
+                      }}
+                      onInput={(event) => resizeTextarea(event.currentTarget)}
+                    />
+                  </Field.Root>
 
-                <Box>
-                  <Flex align="center" justify="space-between" mb="sm">
-                    <Text textStyle="sm" color="fg.muted">
-                      属性
-                    </Text>
-                    <Button
-                      type="button"
-                      variant="subtle"
-                      onClick={() => setAttributeTypeOpen(true)}
-                    >
-                      添加
-                    </Button>
-                  </Flex>
-                  <Flex direction="column" gap="md">
-                    {rows.map((row) => (
-                      <Flex
-                        key={row.id}
-                        align="center"
-                        gap="xs"
-                        width="full"
+                  <Box>
+                    <Flex align="center" justify="space-between" mb="sm">
+                      <Text textStyle="sm" color="fg.muted">
+                        属性
+                      </Text>
+                      <Button
+                        type="button"
+                        variant="subtle"
+                        onClick={() => setAttributeTypeOpen(true)}
                       >
-                        <Input
-                          width="20"
-                          flexShrink="0"
-                          readOnly={row.locked}
-                          bg={row.locked ? "bg.muted" : undefined}
-                          value={row.key}
-                          onChange={(event) =>
-                            updateRow(row.id, (current) => ({
-                              ...current,
-                              key: event.target.value,
-                            }))
-                          }
-                        />
-                        <AttributeValueInput
-                          row={row}
-                          onChange={(value) =>
-                            updateRow(row.id, (current) => ({
-                              ...current,
-                              value,
-                            }))
-                          }
-                        />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          flexShrink="0"
-                          aria-label="删除属性"
-                          disabled={row.locked}
-                          onClick={() => requestDelete("attribute", row.id)}
-                        >
-                          <Icon as={LuTrash2} boxSize="4" />
-                        </Button>
-                      </Flex>
-                    ))}
-                  </Flex>
-                </Box>
-
-                <Box>
-                  <Flex align="center" justify="space-between" mb="sm">
-                    <Text textStyle="sm" color="fg.muted">
-                      图片
-                    </Text>
-                    <Button
-                      type="button"
-                      variant="subtle"
-                      disabled={imageUploading}
-                      onClick={() => imageInputRef.current?.click()}
-                    >
-                      {imageUploading ? <Spinner size="sm" /> : "上传"}
-                    </Button>
-                  </Flex>
-                  <Input
-                    ref={imageInputRef}
-                    type="file"
-                    accept="image/*,.heic,.heif"
-                    multiple
-                    display="none"
-                    onChange={handleImageChange}
-                  />
-                  {imageIds.length > 0 && (
-                    <Flex
-                      width="full"
-                      align="stretch"
-                      gap="sm"
-                      overflowX="auto"
-                      pb="xs"
-                    >
-                      {imageIds.map((imageId) => {
-                        const source = imageSources[imageId];
-                        return (
-                          <EditableImage
-                            key={imageId}
-                            source={source}
-                            onError={() => handleImageError(imageId)}
-                            onRemove={() => removeImage(imageId)}
-                          />
-                        );
-                      })}
+                        添加
+                      </Button>
                     </Flex>
-                  )}
-                </Box>
+                    <Flex direction="column" gap="md">
+                      {rows.map((row) => (
+                        <Flex
+                          key={row.id}
+                          align="center"
+                          gap="xs"
+                          width="full"
+                        >
+                          <Input
+                            width="20"
+                            flexShrink="0"
+                            readOnly={row.locked}
+                            bg={row.locked ? "bg.muted" : undefined}
+                            value={row.key}
+                            onChange={(event) =>
+                              updateRow(row.id, (current) => ({
+                                ...current,
+                                key: event.target.value,
+                              }))
+                            }
+                          />
+                          <AttributeValueInput
+                            row={row}
+                            onChange={(value) =>
+                              updateRow(row.id, (current) => ({
+                                ...current,
+                                value,
+                              }))
+                            }
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            flexShrink="0"
+                            aria-label="删除属性"
+                            disabled={row.locked}
+                            onClick={() => requestDelete("attribute", row.id)}
+                          >
+                            <Icon as={LuTrash2} boxSize="4" />
+                          </Button>
+                        </Flex>
+                      ))}
+                    </Flex>
+                  </Box>
 
-                <Flex direction="column" gap="sm">
-                  <Button
-                    type="submit"
-                    disabled={
-                      !isValid ||
-                      !attributesValid ||
-                      imageUploading ||
-                      isSubmitting
-                    }
-                  >
-                    {isSubmitting ? (
-                      <Flex align="center" gap="xs">
-                        <Spinner size="sm" />
-                        <Text>保存中</Text>
+                  <Box>
+                    <Flex align="center" justify="space-between" mb="sm">
+                      <Text textStyle="sm" color="fg.muted">
+                        图片
+                      </Text>
+                      <Button
+                        type="button"
+                        variant="subtle"
+                        disabled={imageUploading}
+                        onClick={() => imageInputRef.current?.click()}
+                      >
+                        {imageUploading ? <Spinner size="sm" /> : "上传"}
+                      </Button>
+                    </Flex>
+                    <Input
+                      ref={imageInputRef}
+                      type="file"
+                      accept="image/*,.heic,.heif"
+                      multiple
+                      display="none"
+                      onChange={handleImageChange}
+                    />
+                    {imageIds.length > 0 && (
+                      <Flex
+                        width="full"
+                        align="stretch"
+                        gap="sm"
+                        overflowX="auto"
+                        pb="xs"
+                      >
+                        {imageIds.map((imageId) => {
+                          const source = imageSources[imageId];
+                          return (
+                            <EditableImage
+                              key={imageId}
+                              source={source}
+                              onError={() => handleImageError(imageId)}
+                              onRemove={() => removeImage(imageId)}
+                            />
+                          );
+                        })}
                       </Flex>
-                    ) : (
-                      '保存'
                     )}
-                  </Button>
+                  </Box>
+
                   {record && (
                     <Button
                       type="button"
                       variant="subtle"
                       colorPalette="red"
-                      disabled={recordDeleting || closing || isSubmitting}
+                      disabled={busy}
                       onClick={() => requestDelete("record")}
                     >
                       删除
                     </Button>
                   )}
-                </Flex>
+                </fieldset>
               </Box>
             </Drawer.Body>
           </Drawer.Content>

@@ -31,9 +31,14 @@ const LONG_PRESS_MS = 500
 const POINTER_MOVE_TOLERANCE = 8
 
 function paletteForType(type: string): (typeof TYPE_PALETTES)[number] {
-  let hash = 0
-  for (const character of type) hash = (hash * 31 + character.charCodeAt(0)) >>> 0
-  return TYPE_PALETTES[hash % TYPE_PALETTES.length]
+  // 混合完整 Unicode 字符码，再将散列高位折叠进色板索引。
+  // 颜色只依赖类型文字，不随模板来源、记录加载顺序或设备改变。
+  let hash = 2166136261
+  for (const character of type) {
+    hash = Math.imul(hash ^ character.codePointAt(0)!, 16777619)
+  }
+  hash ^= hash >>> 16
+  return TYPE_PALETTES[(hash >>> 0) % TYPE_PALETTES.length]
 }
 
 function AttributeTags({ record }: RecordAttributeTagsProps) {

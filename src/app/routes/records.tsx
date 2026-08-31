@@ -549,6 +549,7 @@ export function RecordsPage() {
           <Button
             variant="subtle"
             w="24"
+            px="sm"
             flexShrink={0}
             aria-label={syncStatus.label}
             aria-busy={syncBusy}
@@ -556,7 +557,7 @@ export function RecordsPage() {
             onClick={() => void handleSyncClick()}
           >
             {syncBusy ? (
-              <Spinner size="sm" />
+              <Spinner size="sm" flexShrink={0} />
             ) : (
               <Icon as={syncStatus.icon} boxSize="5" />
             )}

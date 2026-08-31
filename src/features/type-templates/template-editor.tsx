@@ -81,6 +81,7 @@ export function TypeTemplateEditor({
   }
 
   async function save() {
+    if (saving || deleting) return
     const next = normalizeTemplate({
       type,
       icon,
@@ -130,13 +131,20 @@ export function TypeTemplateEditor({
         open={open}
         placement="bottom"
         size="lg"
-        closeOnInteractOutside={false}
-        closeOnEscape={false}
-        onOpenChange={() => {}}
+        closeOnInteractOutside={!saving && !deleting}
+        closeOnEscape={!saving && !deleting}
+        onOpenChange={(event) => {
+          if (!event.open && !saving && !deleting) onClose()
+        }}
       >
         <Drawer.Backdrop />
         <Drawer.Positioner>
-          <Drawer.Content bg="bg.panel" borderTopRadius="2xl" maxH="90dvh">
+          <Drawer.Content
+            bg="bg.panel"
+            borderTopRadius="2xl"
+            maxH="90dvh"
+            aria-busy={saving || deleting}
+          >
             <Drawer.Header>
               <Flex align="center" justify="space-between" width="full">
                 <Drawer.Title textStyle="lg">
@@ -144,10 +152,14 @@ export function TypeTemplateEditor({
                 </Drawer.Title>
                 <Button
                   variant="plain"
+                  flexShrink={0}
                   disabled={saving || deleting}
-                  onClick={onClose}
+                  loading={saving}
+                  loadingText="保存中"
+                  aria-busy={saving}
+                  onClick={() => void save()}
                 >
-                  取消
+                  保存
                 </Button>
               </Flex>
             </Drawer.Header>
@@ -156,138 +168,132 @@ export function TypeTemplateEditor({
               pb="3xl"
               pointerEvents={saving || deleting ? 'none' : 'auto'}
             >
-              <Flex direction="column" gap="lg">
-                <Grid
-                  templateColumns="2.5rem minmax(0, 1fr)"
-                  gap="sm"
-                  alignItems="end"
-                >
-                  <Field.Root>
-                    <Field.Label textStyle="sm">图标</Field.Label>
-                    <TypeTemplateIconPicker
-                      value={icon}
-                      disabled={saving || deleting}
-                      onChange={setIcon}
-                    />
-                  </Field.Root>
-                  <Field.Root>
-                    <Field.Label textStyle="sm">类型</Field.Label>
-                    <Input
-                      value={type}
-                      readOnly={template !== undefined}
-                      bg={template ? 'bg.muted' : undefined}
-                      onChange={(event) => setType(event.target.value)}
-                    />
-                  </Field.Root>
-                </Grid>
+              <fieldset disabled={saving || deleting} style={{ display: 'contents' }}>
+                <Flex direction="column" gap="lg">
+                  <Grid
+                    templateColumns="2.5rem minmax(0, 1fr)"
+                    gap="sm"
+                    alignItems="end"
+                  >
+                    <Field.Root>
+                      <Field.Label textStyle="sm">图标</Field.Label>
+                      <TypeTemplateIconPicker
+                        value={icon}
+                        disabled={saving || deleting}
+                        onChange={setIcon}
+                      />
+                    </Field.Root>
+                    <Field.Root>
+                      <Field.Label textStyle="sm">类型</Field.Label>
+                      <Input
+                        value={type}
+                        readOnly={template !== undefined}
+                        bg={template ? 'bg.muted' : undefined}
+                        onChange={(event) => setType(event.target.value)}
+                      />
+                    </Field.Root>
+                  </Grid>
 
-                <Box>
-                  <Flex align="center" justify="space-between" mb="sm">
-                    <Text textStyle="sm" color="fg.muted">
-                      预置属性
-                    </Text>
-                    <Button
-                      variant="subtle"
-                      onClick={() =>
-                        setAttributes((current) => [
-                          ...current,
-                          {
-                            id: ulid(),
-                            name: '',
-                            kind: 'text',
-                            options: [],
-                          },
-                        ])
-                      }
-                    >
-                      添加
-                    </Button>
-                  </Flex>
-                  <Flex direction="column" gap="md">
-                    {attributes.map((attribute) => (
-                      <Grid
-                        key={attribute.id}
-                        templateColumns="6rem minmax(0, 1fr) auto"
-                        gap="xs"
-                        alignItems="center"
+                  <Box>
+                    <Flex align="center" justify="space-between" mb="sm">
+                      <Text textStyle="sm" color="fg.muted">
+                        预置属性
+                      </Text>
+                      <Button
+                        variant="subtle"
+                        onClick={() =>
+                          setAttributes((current) => [
+                            ...current,
+                            {
+                              id: ulid(),
+                              name: '',
+                              kind: 'text',
+                              options: [],
+                            },
+                          ])
+                        }
                       >
-                        <NativeSelect.Root width="full">
-                          <NativeSelect.Field
-                            aria-label="属性类型"
-                            value={attribute.kind}
+                        添加
+                      </Button>
+                    </Flex>
+                    <Flex direction="column" gap="md">
+                      {attributes.map((attribute) => (
+                        <Grid
+                          key={attribute.id}
+                          templateColumns="6rem minmax(0, 1fr) auto"
+                          gap="xs"
+                          alignItems="center"
+                        >
+                          <NativeSelect.Root width="full">
+                            <NativeSelect.Field
+                              aria-label="属性类型"
+                              value={attribute.kind}
+                              onChange={(event) =>
+                                updateAttribute(attribute.id, (current) => ({
+                                  ...current,
+                                  kind: event.target.value as TemplateAttributeKind,
+                                }))
+                              }
+                            >
+                              {kinds.map((kind) => (
+                                <option key={kind} value={kind}>
+                                  {templateKindLabel(kind)}
+                                </option>
+                              ))}
+                            </NativeSelect.Field>
+                            <NativeSelect.Indicator />
+                          </NativeSelect.Root>
+                          <Input
+                            minW="0"
+                            value={attribute.name}
                             onChange={(event) =>
                               updateAttribute(attribute.id, (current) => ({
                                 ...current,
-                                kind: event.target.value as TemplateAttributeKind,
+                                name: event.target.value,
                               }))
                             }
-                          >
-                            {kinds.map((kind) => (
-                              <option key={kind} value={kind}>
-                                {templateKindLabel(kind)}
-                              </option>
-                            ))}
-                          </NativeSelect.Field>
-                          <NativeSelect.Indicator />
-                        </NativeSelect.Root>
-                        <Input
-                          minW="0"
-                          value={attribute.name}
-                          onChange={(event) =>
-                            updateAttribute(attribute.id, (current) => ({
-                              ...current,
-                              name: event.target.value,
-                            }))
-                          }
-                        />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          aria-label="删除预置属性"
-                          onClick={() =>
-                            setAttributes((current) =>
-                              current.filter((item) => item.id !== attribute.id),
-                            )
-                          }
-                        >
-                          <LuTrash2 />
-                        </Button>
-                        {attribute.kind === 'option' && (
-                          <TagsInput.Root
-                            gridColumn="1 / span 2"
-                            mt="xs"
-                            width="full"
-                            value={attribute.options}
-                            allowDuplicates={false}
-                            onValueChange={(details) =>
-                              updateAttribute(attribute.id, (current) => ({
-                                ...current,
-                                options: details.value,
-                              }))
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            aria-label="删除预置属性"
+                            onClick={() =>
+                              setAttributes((current) =>
+                                current.filter((item) => item.id !== attribute.id),
+                              )
                             }
                           >
-                            <TagsInput.Control>
-                              <TagsInput.Items />
-                              <TagsInput.Input />
-                            </TagsInput.Control>
-                          </TagsInput.Root>
-                        )}
-                      </Grid>
-                    ))}
-                  </Flex>
-                </Box>
+                            <LuTrash2 />
+                          </Button>
+                          {attribute.kind === 'option' && (
+                            <TagsInput.Root
+                              gridColumn="1 / span 2"
+                              mt="xs"
+                              width="full"
+                              value={attribute.options}
+                              allowDuplicates={false}
+                              onValueChange={(details) =>
+                                updateAttribute(attribute.id, (current) => ({
+                                  ...current,
+                                  options: details.value,
+                                }))
+                              }
+                            >
+                              <TagsInput.Control>
+                                <TagsInput.Items />
+                                <TagsInput.Input />
+                              </TagsInput.Control>
+                            </TagsInput.Root>
+                          )}
+                        </Grid>
+                      ))}
+                    </Flex>
+                  </Box>
 
-                <Flex direction="column" gap="sm" mt="lg">
-                  <Button
-                    width="full"
-                    disabled={saving || deleting}
-                    onClick={() => void save()}
-                  >
-                    {saving ? <Spinner size="sm" /> : '保存'}
-                  </Button>
                   {template && (
                     <Button
                       width="full"
+                      mt="lg"
                       variant="subtle"
                       colorPalette="red"
                       disabled={saving || deleting}
@@ -297,7 +303,7 @@ export function TypeTemplateEditor({
                     </Button>
                   )}
                 </Flex>
-              </Flex>
+              </fieldset>
             </Drawer.Body>
           </Drawer.Content>
         </Drawer.Positioner>
