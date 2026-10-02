@@ -52,7 +52,7 @@ images/{imageId}.webp
 
 - `revision`：模板集合版本，必须与 `manifest.json.typeTemplatesRevision` 一致。
 - `templates`：类型模板全集；一个 `type` 至多一个模板。
-- `icon`：类型模板图标的字符串标识，当前选择器提供 20 个值；旧文件缺少该字段时读取为默认值 `utensils`，已经存储但不再展示在选择器中的旧值仍可正常渲染。
+- `icon`：必填的类型模板图标字符串，合法值见 [`TYPE_TEMPLATE_ICON_OPTIONS`](../src/features/type-templates/icons/icon.ts)；缺失或未知值均视为损坏。
 - `attributes[].kind`：`text`、`number`、`boolean` 或 `option`。
 - `options`：仅 `option` 使用；为空数组表示没有建议值，但表单仍允许输入任意字符串。
 

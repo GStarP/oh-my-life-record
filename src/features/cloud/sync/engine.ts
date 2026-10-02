@@ -1,12 +1,6 @@
 /**
- * SyncEngine：全部同步决策的纯 TS 实现。
- *
- * 这是本仓库唯一的同步测试接缝（见docs/设计文档.md「同步模型」）：引擎不依赖
- * fetch / indexedDB / React 或任何浏览器 API，只通过注入的
- * StorageAdapter（本地）与 CloudAdapter（云端）访问外部世界，
- * 因此可在 Node 环境以内存假实现测试全部同步规则。
- *
- * 规则来源：docs/设计文档.md §5、ADR-0002（云端优先）。
+ * 云端同步规则：通过注入的本地存储和云端接口执行，不依赖浏览器或 React。
+ * 规则来源：docs/设计文档.md §5、ADR-0002。
  */
 import { SCHEMA_VERSION } from '../r2/schema'
 import type {
@@ -32,39 +26,22 @@ const EMPTY_MANIFEST: Manifest = {
   typeTemplatesRevision: 0,
 }
 
-/**
- * 对单个月份分类。这是同步决策的核心纯函数。
- *
- * 判定规则（docs/设计文档.md §5.2）：
- * - 云端 > 本地 且 dirty → conflict（云端优先，需确认覆盖）
- * - 云端 > 本地 且 !dirty → download（直接拉取）
- * - 云端 = 本地 且 dirty → upload
- * - 云端 = 本地 且 !dirty → none
- * - 云端 < 本地 → none（防御：本地版本不可能高于云端，出现即视为异常）
- * - 云端无此月 且 dirty → upload（本地新建月的首次上传）
- * - 云端无此月 且 !dirty → none
- */
-function classify(
-  month: string,
-  local: PartitionState | undefined,
+/** 分片与模板共用版本判定；云端低于本地已确认值时保持不读写。 */
+function classifyRevision(
+  localRevision: number,
+  dirty: boolean,
   cloudRevision: number | undefined,
-): SyncClassification {
-  const localRevision = local?.remoteRevision ?? 0
-  const dirty = local?.dirty ?? false
-
+): SyncKind {
   if (cloudRevision !== undefined) {
     if (cloudRevision > localRevision) {
-      return { month, kind: dirty ? 'conflict' : 'download' }
+      return dirty ? 'conflict' : 'download'
     }
     if (cloudRevision === localRevision) {
-      return { month, kind: dirty ? 'upload' : 'none' }
+      return dirty ? 'upload' : 'none'
     }
-    // 云端 < 本地：防御性无操作。
-    return { month, kind: 'none' }
+    return 'none'
   }
-
-  // 云端无此月。
-  return { month, kind: dirty ? 'upload' : 'none' }
+  return dirty ? 'upload' : 'none'
 }
 
 /** 对「云端 ∪ 本地」所有月份分类，按月份升序返回。 */
@@ -78,27 +55,17 @@ function classifyAll(
 
   return [...months]
     .sort()
-    .map((month) =>
-      classify(month, stateByMonth.get(month), manifest.partitions[month]),
-    )
-}
-
-/** 对全局类型模板集合应用与月份相同的版本/dirty 判定。 */
-function classifyTypeTemplates(
-  localRemoteRevision: number,
-  localDirty: boolean,
-  cloudRevision: number | undefined,
-): SyncClassification['kind'] {
-  if (cloudRevision !== undefined) {
-    if (cloudRevision > localRemoteRevision) {
-      return localDirty ? 'conflict' : 'download'
-    }
-    if (cloudRevision === localRemoteRevision) {
-      return localDirty ? 'upload' : 'none'
-    }
-    return 'none'
-  }
-  return localDirty ? 'upload' : 'none'
+    .map((month) => {
+      const local = stateByMonth.get(month)
+      return {
+        month,
+        kind: classifyRevision(
+          local?.remoteRevision ?? 0,
+          local?.dirty ?? false,
+          manifest.partitions[month],
+        ),
+      }
+    })
 }
 
 /**
@@ -130,7 +97,7 @@ export async function checkForUpdates(
   const manifest = (await cloud.getManifest()) ?? EMPTY_MANIFEST
   const states = await storage.getAllPartitionStates()
   const templateState = await storage.getTypeTemplateState()
-  const templateKind: SyncKind = classifyTypeTemplates(
+  const templateKind = classifyRevision(
     templateState?.remoteRevision ?? 0,
     templateState?.dirty ?? false,
     manifest.typeTemplatesRevision,
@@ -139,19 +106,9 @@ export async function checkForUpdates(
 }
 
 /**
- * 完整同步（唯一写入入口，docs/设计文档.md §5.2）。
- *
- * 下载与上传按「月份」粒度同时进行：a 月上传、b 月下载是正常同步，互不干扰；
- * 只有同一个月「云端更高 且 本地 dirty」才是冲突，需确认后以云端覆盖。
- *
- * 顺序：
- * 1. 重读 manifest，逐月分类。
- * 2. 若存在冲突月：先 confirmConflict（取消则整体中止、零变更），
- *    确认后冲突月转为下载（云端覆盖本地）。
- * 3. 下载月与上传月分别执行（可同时）：下载校验失败收集进 brokenMonths，
- *    不覆盖本地、不中止；上传失败则异常上抛。
- * 4. outcome 综合判定：都做 → synced；仅上传 → uploaded；仅下载 → downloaded；
- *    都没做 → already-latest。
+ * 记录与模板快照的全局同步入口（docs/设计文档.md §5.2）。
+ * 冲突取消时整体中止；确认后先下载再上传。损坏文件保留本地数据并在
+ * 返回值中报告，其余请求或写入错误向调用方传播。
  */
 export async function sync(
   storage: StorageAdapter,
@@ -165,7 +122,7 @@ export async function sync(
 
   const classes = classifyAll(manifest, await storage.getAllPartitionStates())
   const templateState = await storage.getTypeTemplateState()
-  const templateKind = classifyTypeTemplates(
+  const templateKind = classifyRevision(
     templateState?.remoteRevision ?? 0,
     templateState?.dirty ?? false,
     manifest.typeTemplatesRevision,
@@ -188,7 +145,7 @@ export async function sync(
     downloads.push(...conflicts)
   }
 
-  // 下载月与上传月同时执行，互不干扰。
+  // 同一次同步允许不同月份分别下载或上传；先下载，再上传。
   const { brokenMonths, brokenTypeTemplates, didDownload } = await downloadPhase(
     storage,
     cloud,

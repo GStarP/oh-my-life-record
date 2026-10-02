@@ -13,6 +13,7 @@ import {
   useSyncExternalStore,
 } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
+import { useRouterState } from '@tanstack/react-router'
 import {
   Box,
   Button,
@@ -114,6 +115,9 @@ function syncStatusView(indicator: SyncIndicator) {
 }
 
 export function RecordsPage() {
+  const visible = useRouterState({
+    select: (state) => state.location.pathname === '/records',
+  })
   const recordData = useAtomValue(recordDataAtom)
   const typeTemplates = useAtomValue(typeTemplateDataAtom).templates
   const { records, nextMonth } = recordData
@@ -216,10 +220,6 @@ export function RecordsPage() {
     }
   }, [configured, setCloudBlocked])
 
-  useEffect(() => {
-    void refreshSyncIndicator()
-  }, [refreshSyncIndicator])
-
   const filteredRecords = useMemo(
     () => filterRecordsByType(records, filter),
     [filter, records],
@@ -232,10 +232,16 @@ export function RecordsPage() {
 
   const virtualizer = useVirtualizer({
     count: items.length,
+    getItemKey: (index) => {
+      const item = items[index]
+      return item.kind === 'day' ? `day:${item.group.key}` : `record:${item.record.id}`
+    },
     getScrollElement: () => scrollRef.current,
     estimateSize: (index) => (items[index]?.kind === 'day' ? 36 : 112),
     overscan: 6,
   })
+  // 距顶部的像素位置属于用户，不随记录或测量高度变化自动补偿。
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = () => false
   const virtualItems = virtualizer.getVirtualItems()
 
   async function loadOlderMonth() {
@@ -271,6 +277,7 @@ export function RecordsPage() {
   }
 
   useEffect(() => {
+    if (!visible) return
     const root = scrollRef.current
     const sentinel = olderRecordsSentinelRef.current
     if (!root || !sentinel || !nextMonth) return
@@ -285,7 +292,7 @@ export function RecordsPage() {
     )
     observer.observe(sentinel)
     return () => observer.disconnect()
-  }, [items.length, nextMonth, olderLoading, olderLoadError])
+  }, [visible, items.length, nextMonth, olderLoading, olderLoadError])
 
   async function openNewRecord() {
     try {
@@ -589,6 +596,7 @@ export function RecordsPage() {
           flex="1"
           minH="0"
           overflowY="auto"
+          overflowAnchor="none"
           overscrollBehaviorY="contain"
           px="md"
           role="list"

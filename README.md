@@ -20,11 +20,12 @@ pnpm build
 pnpm dlx wrangler deploy
 ```
 
-提交前运行：
+## 开发验证
+
+提交前运行（构建包含 TypeScript 检查）：
 
 ```bash
-pnpm exec tsc --noEmit
-pnpm test -- --run
+pnpm test
 pnpm build
 ```
 
@@ -43,7 +44,7 @@ pnpm build
 ## 代码结构
 
 - `src/app/`：应用壳、路由、页面和应用生命周期单例。
-- `src/design-system/`：Chakra 主题与共享 UI 组合；Password Input 是按 Chakra 官方组合方式封装的项目组件。
+- `src/design-system/`：Chakra 主题与通用 UI 组合。
 - `src/features/`：全部业务代码，按记录、类型模板、云端、本地存储、偏好和通知聚合；接口与具体实现放在所属业务能力内。
 - `src/utils/`：不含业务语义的通用工具，目前只有固定 UTC+8 的时间换算。
 - `tests/`：外部行为和核心纯函数测试。

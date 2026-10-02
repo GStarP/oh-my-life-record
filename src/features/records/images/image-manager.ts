@@ -14,13 +14,11 @@ import type {
   ImageManagerOptions,
 } from './image-manager.type'
 
-type ResourceKey = string
-
-function makeResourceKey(namespace: string, imageId: string): ResourceKey {
+function makeResourceKey(namespace: string, imageId: string): string {
   return JSON.stringify([namespace, imageId])
 }
 
-function parseResourceKey(value: ResourceKey): string | undefined {
+function parseResourceKey(value: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(value)
     if (
@@ -32,8 +30,7 @@ function parseResourceKey(value: ResourceKey): string | undefined {
       return parsed[1]
     }
   } catch {
-    // Resource keys are internal; a malformed key should only disappear from
-    // the public snapshot, not make the whole image manager fail.
+    // 单个资源键损坏只忽略该项，避免整个图片快照不可用。
   }
   return undefined
 }

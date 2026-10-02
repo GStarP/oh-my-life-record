@@ -79,8 +79,8 @@ export function RootLayout() {
   useEffect(() => {
     const updateConnectivity = () => {
       const online = window.navigator.onLine
+      // 这里只更新联网状态；是否阻断由检查器在等待与重试后决定。
       setOnline(online)
-      if (!online) setCloudBlocked(true)
     }
     updateConnectivity()
     window.addEventListener('online', updateConnectivity)
@@ -89,9 +89,10 @@ export function RootLayout() {
       window.removeEventListener('online', updateConnectivity)
       window.removeEventListener('offline', updateConnectivity)
     }
-  }, [setCloudBlocked, setOnline])
+  }, [setOnline])
 
   useEffect(() => {
+    if (!configured) return
     return startSyncIndicatorMonitor(() => setCloudBlocked(true))
   }, [configured, setCloudBlocked])
 
@@ -123,14 +124,20 @@ export function RootLayout() {
           flex="1"
           minH="0"
           overflow="hidden"
+          position="relative"
           display="flex"
           flexDirection="column"
         >
           {recordsMounted && (
             <Suspense fallback={<Box flex="1" minH="0" />}>
+              {/* 保留布局尺寸，避免隐藏时的零尺寸污染虚拟列表测量缓存。 */}
               <Box
-                display={recordsVisible ? 'flex' : 'none'}
-                flex="1"
+                position="absolute"
+                inset="0"
+                visibility={recordsVisible ? 'visible' : 'hidden'}
+                inert={!recordsVisible}
+                aria-hidden={!recordsVisible}
+                display="flex"
                 minH="0"
                 flexDirection="column"
               >
@@ -141,8 +148,12 @@ export function RootLayout() {
           {settingsMounted && (
             <Suspense fallback={<Box flex="1" minH="0" />}>
               <Box
-                display={settingsVisible ? 'flex' : 'none'}
-                flex="1"
+                position="absolute"
+                inset="0"
+                visibility={settingsVisible ? 'visible' : 'hidden'}
+                inert={!settingsVisible}
+                aria-hidden={!settingsVisible}
+                display="flex"
                 minH="0"
                 flexDirection="column"
               >
