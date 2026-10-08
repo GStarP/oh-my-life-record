@@ -6,7 +6,7 @@ import {
   useLongPress,
 } from 'use-long-press'
 import type { LongPressPointerHandlers } from 'use-long-press'
-import { Image } from '../../../design-system/components/image'
+import { RecordImage } from '../images/record-image'
 import { formatTimeOfDay } from '../../../utils/time'
 import { useImageSources } from '../images/use-image-sources'
 import type {
@@ -76,10 +76,6 @@ export function RecordCard({ record, onOpen, imageManager }: RecordCardProps) {
     cancelOnMovement: POINTER_MOVE_TOLERANCE,
     cancelOutsideElement: true,
   })() as LongPressPointerHandlers<HTMLElement>
-
-  function handleImageError(imageId: string) {
-    invalidateImage(imageId)
-  }
 
   function handlePointerDown(event: PointerEvent<HTMLElement>) {
     pointerInteraction.current = true
@@ -169,18 +165,15 @@ export function RecordCard({ record, onOpen, imageManager }: RecordCardProps) {
           {record.images.length > 0 && (
             <Flex gap="xs" overflowX="auto">
               {record.images.map((imageId) => (
-                <Image
+                <RecordImage
                   key={imageId}
                   src={
                     imageSources[imageId]?.kind === 'ready'
                       ? imageSources[imageId].url
                       : undefined
                   }
-                  alt="记录图片"
                   boxSize="16"
-                  flexShrink="0"
-                  objectFit="cover"
-                  onError={() => handleImageError(imageId)}
+                  onError={() => invalidateImage(imageId)}
                 />
               ))}
             </Flex>

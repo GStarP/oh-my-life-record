@@ -29,7 +29,7 @@ import {
 } from "@chakra-ui/react";
 import { LuTrash2, LuX } from "react-icons/lu";
 import { ulid } from "ulidx";
-import { Image } from "../../../design-system/components/image";
+import { RecordImage } from '../images/record-image'
 import { parseDateTimeInput, formatDateTimeInput } from "../../../utils/time";
 import { toaster } from "../../notifications/toaster";
 import { useImageSources } from '../images/use-image-sources'
@@ -71,14 +71,10 @@ function EditableImage({
       borderRadius="lg"
       overflow="hidden"
     >
-      <Image
+      <RecordImage
         src={source?.kind === "ready" ? source.url : undefined}
-        alt="记录图片"
-        width="full"
-        height="full"
+        boxSize="full"
         borderRadius="lg"
-        objectFit="cover"
-        draggable={false}
         onError={onError}
       />
       <IconButton
@@ -121,9 +117,6 @@ export function RecordEditor({
   const [recordDeleting, setRecordDeleting] = useState(false);
   const [attributeTypeOpen, setAttributeTypeOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(undefined);
-  const [deleteAttributeId, setDeleteAttributeId] = useState<
-    string | undefined
-  >();
   const descriptionRef = useRef<HTMLTextAreaElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const imageUploadPromiseRef = useRef<Promise<void> | undefined>(undefined);
@@ -151,15 +144,6 @@ export function RecordEditor({
     invalidateImage,
   } = useImageSources(imageManager, imageIds, open);
 
-  function removeImage(id: string) {
-    const next = imageIds.filter((imageId) => imageId !== id);
-    setImageIds(next);
-  }
-
-  function handleImageError(id: string) {
-    invalidateImage(id);
-  }
-
   useEffect(() => {
     if (!open) return;
     setImageIds(record?.images ?? []);
@@ -171,7 +155,6 @@ export function RecordEditor({
     });
     setRows(attributesToRows(record?.attributes ?? {}, template));
     setDeleteTarget(undefined);
-    setDeleteAttributeId(undefined);
     setImageUploading(false);
     setClosing(false);
     setRecordDeleting(false);
@@ -200,24 +183,19 @@ export function RecordEditor({
     setAttributeTypeOpen(false);
   }
 
-  function requestDelete(target: Exclude<DeleteTarget, undefined>, id?: string) {
-    setDeleteTarget(target);
-    if (target === "attribute") setDeleteAttributeId(id);
-  }
-
   async function confirmDelete() {
     const target = deleteTarget;
-    if (target === "attribute") {
+    if (target?.kind === "image") {
+      setImageIds((current) => current.filter((imageId) => imageId !== target.id));
       setDeleteTarget(undefined);
-      if (deleteAttributeId) {
-        setRows((current) =>
-          current.filter((row) => row.id !== deleteAttributeId),
-        );
-      }
-      setDeleteAttributeId(undefined);
       return;
     }
-    if (target !== "record" || !record || recordDeleting) return;
+    if (target?.kind === "attribute") {
+      setRows((current) => current.filter((row) => row.id !== target.id));
+      setDeleteTarget(undefined);
+      return;
+    }
+    if (target?.kind !== "record" || !record || recordDeleting) return;
     setRecordDeleting(true);
     committingRef.current = true;
     try {
@@ -483,7 +461,7 @@ export function RecordEditor({
                             flexShrink="0"
                             aria-label="删除属性"
                             disabled={row.locked}
-                            onClick={() => requestDelete("attribute", row.id)}
+                            onClick={() => setDeleteTarget({ kind: "attribute", id: row.id })}
                           >
                             <Icon as={LuTrash2} boxSize="4" />
                           </Button>
@@ -528,8 +506,8 @@ export function RecordEditor({
                             <EditableImage
                               key={imageId}
                               source={source}
-                              onError={() => handleImageError(imageId)}
-                              onRemove={() => removeImage(imageId)}
+                              onError={() => invalidateImage(imageId)}
+                              onRemove={() => setDeleteTarget({ kind: "image", id: imageId })}
                             />
                           );
                         })}
@@ -543,7 +521,7 @@ export function RecordEditor({
                       variant="subtle"
                       colorPalette="red"
                       disabled={busy}
-                      onClick={() => requestDelete("record")}
+                      onClick={() => setDeleteTarget({ kind: "record" })}
                     >
                       删除
                     </Button>
@@ -604,9 +582,16 @@ export function RecordEditor({
           <Dialog.Content width="calc(100% - 2rem)" maxW="sm" bg="bg.panel">
             <Dialog.Header>
               <Dialog.Title textStyle="md">
-                  {deleteTarget === "attribute" ? "删除属性" : "删除记录"}
-                </Dialog.Title>
-              </Dialog.Header>
+                {deleteTarget?.kind === "image"
+                  ? "删除图片"
+                  : deleteTarget?.kind === "attribute" ? "删除属性" : "删除记录"}
+              </Dialog.Title>
+            </Dialog.Header>
+            {deleteTarget?.kind === "image" && (
+              <Dialog.Body>
+                <Text>确定从当前记录中移除这张图片吗？保存记录后生效。</Text>
+              </Dialog.Body>
+            )}
             <Dialog.Footer>
               <Flex width="full" gap="sm">
                 <Button

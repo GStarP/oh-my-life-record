@@ -32,4 +32,7 @@ export type RecordEditorProps = {
   onDeleted: (record: LifeRecord) => Promise<void>
 }
 
-export type DeleteTarget = 'record' | 'attribute' | undefined
+export type DeleteTarget =
+  | { kind: 'record' }
+  | { kind: 'attribute' | 'image'; id: string }
+  | undefined

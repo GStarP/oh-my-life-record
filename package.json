@@ -13,6 +13,7 @@
     "@chakra-ui/react": "^3.36.1",
     "@date-fns/utc": "^2.1.1",
     "@emotion/react": "^11.14.0",
+    "@panzoom/panzoom": "^4.6.2",
     "@tanstack/react-router": "^1.170.28",
     "@tanstack/react-virtual": "^3.14.9",
     "aws4fetch": "^1.0.20",
