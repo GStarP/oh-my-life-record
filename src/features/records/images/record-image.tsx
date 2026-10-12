@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { Box, Dialog, Icon, IconButton, Portal, chakra } from '@chakra-ui/react'
+import { Box, Dialog, Icon, IconButton, Portal, Text, chakra } from '@chakra-ui/react'
 import Panzoom from '@panzoom/panzoom'
-import { LuX } from 'react-icons/lu'
+import { LuRefreshCw, LuX } from 'react-icons/lu'
 import { Image } from '../../../design-system/components/image'
 import type {
   ImagePreviewProps,
@@ -114,38 +114,69 @@ function ImagePreview({ src, onClose, onError }: ImagePreviewProps) {
 }
 
 /** 隔离图片事件，避免触发父级记录卡片的长按编辑。 */
-export function RecordImage({ src, boxSize, borderRadius, onError }: RecordImageProps) {
+export function RecordImage({ src, boxSize, borderRadius, onError, unavailable, onRetry }: RecordImageProps) {
   // 加载失败时也保留预览层和关闭按钮；资源恢复后使用最新 URL 继续显示。
   const [previewSource, setPreviewSource] = useState<string>()
+  const thumbnailRef = useRef<HTMLButtonElement>(null)
+  const loadingTimer = useRef<number | undefined>(undefined)
+  const errorHandler = useRef(onError)
+  errorHandler.current = onError
+  useEffect(() => {
+    // CORS 直链回退也不能无限停在加载中；缓存/本地 Blob 不需要此网络时限。
+    if (!src?.startsWith('http') || thumbnailRef.current?.querySelector('img')?.complete) return
+    loadingTimer.current = window.setTimeout(() => errorHandler.current(), 10_000)
+    return () => window.clearTimeout(loadingTimer.current)
+  }, [src])
   return (
     <>
       <chakra.button
+        ref={thumbnailRef}
         type="button"
-        aria-label="查看记录图片"
-        disabled={!src}
+        aria-label={unavailable ? '重新加载记录图片' : '查看记录图片'}
+        title={unavailable ? '联网后可加载，点击重试' : undefined}
+        disabled={!src && !unavailable}
         boxSize={boxSize}
         flexShrink="0"
         borderRadius={borderRadius}
         overflow="hidden"
-        cursor={src ? 'zoom-in' : 'default'}
+        cursor={unavailable ? 'pointer' : src ? 'zoom-in' : 'default'}
         onPointerDown={(event) => event.stopPropagation()}
         onPointerUp={(event) => event.stopPropagation()}
         onKeyDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation()
-          setPreviewSource(src)
+          if (unavailable) onRetry()
+          else setPreviewSource(src)
         }}
       >
-        <Image
-          src={src}
-          alt="记录图片"
-          width="full"
-          height="full"
-          borderRadius={borderRadius}
-          objectFit="cover"
-          draggable={false}
-          onError={onError}
-        />
+        {unavailable ? (
+          <Box
+            width="full"
+            height="full"
+            bg="bg.muted"
+            color="fg.muted"
+            display="flex"
+            flexDirection="column"
+            alignItems="center"
+            justifyContent="center"
+            gap="2xs"
+          >
+            <Icon as={LuRefreshCw} boxSize="4" />
+            <Text fontSize="10px">联网后可加载</Text>
+          </Box>
+        ) : (
+          <Image
+            src={src}
+            alt="记录图片"
+            width="full"
+            height="full"
+            borderRadius={borderRadius}
+            objectFit="cover"
+            draggable={false}
+            onError={onError}
+            onLoad={() => window.clearTimeout(loadingTimer.current)}
+          />
+        )}
       </chakra.button>
       {previewSource && (
         <ImagePreview

@@ -1,38 +1,17 @@
 /**
  * 云端凭证存取（localStorage 封装，ADR-0001）。
  *
- * 与 React 无关的模块级函数：设置页写入、首次引导读取、启动判定共用。
- * 存储键固定；损坏的 JSON 按未配置处理（引导弹窗会重新收集）。
+ * 与 React 无关的模块级函数：连接面板写入、云端操作读取。
+ * 存储键固定；损坏的 JSON 按未配置处理，仍允许纯本地使用。
  * 桶名由表单收集并随凭证保存。
  */
 import type { R2Config } from '../cloud.type'
 import type { CredentialDraft } from './credential.type'
 
-/** localStorage 键。 */
 export const CREDENTIAL_STORAGE_KEY = 'omlr-cloud-credential'
 
 /** 表单草稿键；草稿不能覆盖已验证的凭证键。 */
 export const CREDENTIAL_DRAFT_STORAGE_KEY = 'omlr-cloud-credential-draft'
-
-function readObject(storage: Storage): Record<string, unknown> | undefined {
-  return readObjectFromKey(storage, CREDENTIAL_STORAGE_KEY)
-}
-
-function readDraftObject(storage: Storage): Record<string, unknown> | undefined {
-  return readObjectFromKey(storage, CREDENTIAL_DRAFT_STORAGE_KEY)
-}
-
-function readDraft(storage: Storage): CredentialDraft | undefined {
-  const value = readDraftObject(storage) ?? readObject(storage)
-  if (!value) return undefined
-  return {
-    endpoint: typeof value.endpoint === 'string' ? value.endpoint : '',
-    bucket: typeof value.bucket === 'string' ? value.bucket.trim() : '',
-    accessKeyId: typeof value.accessKeyId === 'string' ? value.accessKeyId : '',
-    accessKeySecret:
-      typeof value.accessKeySecret === 'string' ? value.accessKeySecret : '',
-  }
-}
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
@@ -44,14 +23,22 @@ function isNonEmptyString(value: unknown): value is string {
  * 表单草稿由 getCredentialDraft 读取，避免把残缺配置误当成可用凭证。
  */
 export function getCredential(storage: Storage = localStorage): R2Config | undefined {
-  return completeCredentialFromObject(readObject(storage))
+  return completeCredentialFromObject(readObjectFromKey(storage, CREDENTIAL_STORAGE_KEY))
 }
 
 /** 读取凭证表单草稿；残缺字段保留为空字符串，供刷新后继续填写。 */
 export function getCredentialDraft(
   storage: Storage = localStorage,
 ): CredentialDraft | undefined {
-  return readDraft(storage)
+  const value = readObjectFromKey(storage, CREDENTIAL_DRAFT_STORAGE_KEY) ??
+    readObjectFromKey(storage, CREDENTIAL_STORAGE_KEY)
+  if (!value) return undefined
+  return {
+    endpoint: typeof value.endpoint === 'string' ? value.endpoint : '',
+    bucket: typeof value.bucket === 'string' ? value.bucket.trim() : '',
+    accessKeyId: typeof value.accessKeyId === 'string' ? value.accessKeyId : '',
+    accessKeySecret: typeof value.accessKeySecret === 'string' ? value.accessKeySecret : '',
+  }
 }
 
 /** 保存已验证凭证；桶名由用户填写，写入前只去除首尾空白。 */
@@ -74,8 +61,8 @@ export function setCredentialDraft(
 }
 
 /**
- * 完整性判定：端点、桶名和三项访问凭证全非空才视为已配置。
- * 启动开关：false → 全屏云端凭证配置弹窗（见 credential-modal）。
+ * 完整性判定：端点、桶名和两项访问凭证全非空才视为已配置。
+ * 只决定能否发起云端请求，不控制本地应用入口。
  */
 export function hasCredential(config: R2Config | undefined): boolean {
   return Boolean(

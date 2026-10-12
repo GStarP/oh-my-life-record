@@ -25,6 +25,7 @@ export type ImageResourceLease = {
   setImageIds(imageIds: string[]): void
   addStagedImages(images: StagedImagePreview[]): void
   invalidateImage(imageId: string): void
+  retryImage(imageId: string): void
   release(): void
 }
 

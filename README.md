@@ -1,6 +1,6 @@
 # Oh My Life
 
-单用户、移动优先的生活记录 PWA。IndexedDB 保存本地业务数据，Cloudflare R2 保存云端快照和图片；同步由用户主动触发。
+单用户、移动优先的生活记录 PWA，支持无凭证和离线记录。IndexedDB 保存本地业务数据，Cloudflare R2 保存云端快照和图片；同步由用户主动触发。
 
 ## 快速开始
 
@@ -22,12 +22,7 @@ pnpm dlx wrangler deploy
 
 ## 开发验证
 
-提交前运行（构建包含 TypeScript 检查）：
-
-```bash
-pnpm test
-pnpm build
-```
+提交前按[开发验证](docs/开发验证.md)运行本地回归与生产构建。该文档也包含离线检查步骤和真实 R2 冒烟的运行方式。
 
 ## 文档入口
 
@@ -38,8 +33,9 @@ pnpm build
 3. [当前产品与运行架构](docs/设计文档.md)
 4. [架构决策](docs/adr/)
 5. [S3/R2 存储格式](docs/cloud-storage-format.md)
+6. [开发验证](docs/开发验证.md)
 
-文档职责保持单一：术语看 `CONTEXT.md`，当前架构看 `docs/设计文档.md`，决策原因看 `docs/adr/`，桶内数据格式只看 `docs/cloud-storage-format.md`。早期讨论、已完成票据和已验收交付记录不保留在仓库中。
+早期讨论、已完成票据和一次性交付记录不保留在仓库中；临时文件按[票据规则](docs/agents/issue-tracker.md)处理。
 
 ## 代码结构
 

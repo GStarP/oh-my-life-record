@@ -1,22 +1,11 @@
-/**
- * 凭证配置表单使用的类型。
- *
- * 与 R2Config 分开：表单允许保存「尚未填完」的草稿，而 R2Config
- * 只代表可以实际发起请求的完整配置。桶名必须由用户明确填写。
- */
-export type CredentialDraft = {
-  endpoint: string
-  bucket: string
-  accessKeyId: string
-  accessKeySecret: string
-}
+import type { R2Config } from '../cloud.type'
+
+/** 草稿与凭证字段相同，但允许空字符串；只有验证成功后才成为可用凭证。 */
+export type CredentialDraft = R2Config
 
 export type CredentialModalState = 'idle' | 'verifying'
 
 export type CredentialModalProps = {
-  /** 首次引导或云端异常：没有可用云端连接时禁止手动关闭。 */
-  force?: boolean
-  /** 设置页入口：受控开关，可关闭。 */
-  open?: boolean
-  onClose?: () => void
+  open: boolean
+  onClose: () => void
 }

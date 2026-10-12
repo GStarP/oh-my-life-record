@@ -8,17 +8,14 @@ import type {
   ImageDisplaySource,
   ImageManager,
   ImageManagerLease,
+  ImageSources,
 } from './image-manager.type'
 
 export function useImageSources(
   imageManager: ImageManager,
   imageIds: string[],
   enabled = true,
-): {
-  sources: Record<string, ImageDisplaySource>
-  addStagedImages: (images: StagedImagePreview[]) => void
-  invalidateImage: (imageId: string) => void
-} {
+): ImageSources {
   // 记录页和编辑器会被 keep-alive；凭证变化时必须主动重建租约，
   // 让同一 imageId 重新落到新的 endpoint/bucket 命名空间。
   const credential = useAtomValue(credentialAtom)
@@ -52,5 +49,9 @@ export function useImageSources(
     leaseRef.current?.invalidateImage(imageId)
   }, [])
 
-  return { sources, addStagedImages, invalidateImage }
+  const retryImage = useCallback((imageId: string) => {
+    leaseRef.current?.retryImage(imageId)
+  }, [])
+
+  return { sources, addStagedImages, invalidateImage, retryImage }
 }

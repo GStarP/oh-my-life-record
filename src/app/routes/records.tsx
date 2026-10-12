@@ -30,14 +30,13 @@ import {
   LuCloudUpload,
   LuPlus,
   LuRefreshCw,
+  LuRefreshCwOff,
   LuSearch,
 } from 'react-icons/lu'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { currentCloud, imageManager, storage } from '../runtime'
 import {
-  cloudBlockedAtom,
-  configuredAtom,
-  onlineAtom,
+  credentialModalOpenAtom,
   syncBusyAtom,
 } from '../../features/cloud/state'
 import {
@@ -51,10 +50,14 @@ import type {
 import { sync as syncCloud } from '../../features/cloud/sync/engine'
 import { toaster } from '../../features/notifications/toaster'
 import {
-  getSyncIndicator,
+  cancelSyncCheck,
+  getSyncSnapshot,
+  refreshLocalSyncIndicator,
+  reportSyncFailure,
   refreshSyncIndicator as refreshSharedSyncIndicator,
   subscribeSyncIndicator,
 } from '../sync-indicator'
+import { cloudErrorMessage } from '../../features/cloud/request-error'
 import { cleanupLocalOrphanImages, stageImageFiles } from '../../features/records/images/image-staging'
 import { loadInitialRecords, loadOlderRecords } from '../../features/records/list/record-data'
 import {
@@ -131,8 +134,7 @@ export function RecordsPage() {
   const [filterInput, setFilterInput] = useState('')
   const [filter, setFilter] = useState('')
   const [syncBusy, setSyncBusy] = useAtom(syncBusyAtom)
-  const [syncCheckIndicator, setSyncCheckIndicator] = useState<SyncIndicator>()
-  const isOnline = useAtomValue(onlineAtom)
+  const [syncChecking, setSyncChecking] = useState(false)
   const [conflictDialog, setConflictDialog] = useState<ConflictDialogState>()
   const [brokenMonths, setBrokenMonths] = useState<string[]>()
   const [editorOpen, setEditorOpen] = useState(false)
@@ -146,12 +148,11 @@ export function RecordsPage() {
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const olderRecordsSentinelRef = useRef<HTMLDivElement | null>(null)
   const filterComposingRef = useRef(false)
-  const configured = useAtomValue(configuredAtom)
-  const setCloudBlocked = useSetAtom(cloudBlockedAtom)
-  const syncIndicator = useSyncExternalStore(
+  const setCredentialModalOpen = useSetAtom(credentialModalOpenAtom)
+  const syncSnapshot = useSyncExternalStore(
     subscribeSyncIndicator,
-    getSyncIndicator,
-    getSyncIndicator,
+    getSyncSnapshot,
+    getSyncSnapshot,
   )
 
   const uploadImages = useCallback(
@@ -203,22 +204,6 @@ export function RecordsPage() {
         toaster.create({ title: '加载记录失败：' + message, type: 'error' })
       })
   }, [recordData.initialStatus])
-
-  const refreshSyncIndicator = useCallback(async () => {
-    if (!configured) return
-    try {
-      // 只读取 manifest；结果写入应用级缓存，不随记录页卸载而丢失。
-      await refreshSharedSyncIndicator()
-    } catch (error) {
-      setCloudBlocked(true)
-      toaster.create({
-        title:
-          '云端连接失败：' +
-          (error instanceof Error ? error.message : String(error)),
-        type: 'error',
-      })
-    }
-  }, [configured, setCloudBlocked])
 
   const filteredRecords = useMemo(
     () => filterRecordsByType(records, filter),
@@ -295,6 +280,7 @@ export function RecordsPage() {
   }, [visible, items.length, nextMonth, olderLoading, olderLoadError])
 
   async function openNewRecord() {
+    if (syncBusy) return
     try {
       const templates = await typeTemplateWorkflow.list()
       updateTypeTemplateData((current) => ({
@@ -314,6 +300,7 @@ export function RecordsPage() {
   }
 
   async function openExistingRecord(record: LifeRecord) {
+    if (syncBusy) return
     setEditorLoading(true)
     setEditorOpen(false)
     try {
@@ -366,6 +353,19 @@ export function RecordsPage() {
     }))
   }
 
+  async function refreshLocalViews() {
+    const results = await Promise.allSettled([refreshRecords(), refreshTypeTemplates()])
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        toaster.create({
+          title: '刷新本地数据失败：' +
+            (result.reason instanceof Error ? result.reason.message : String(result.reason)),
+          type: 'error',
+        })
+      }
+    }
+  }
+
   async function requestConflictConfirmation(
     conflictMonths: string[],
     typeTemplatesConflict: boolean,
@@ -413,7 +413,7 @@ export function RecordsPage() {
       records: mergeRecords(current.records, [saved]),
     }))
     reportCleanupError(result.cleanupError)
-    await refreshSyncIndicator()
+    void refreshLocalSyncIndicator().catch(() => {})
     setEditorOpen(false)
     setEditingRecord(undefined)
     setEditorInitialType(undefined)
@@ -428,7 +428,7 @@ export function RecordsPage() {
       records: current.records.filter((item) => item.id !== record.id),
     }))
     reportCleanupError(result.cleanupError)
-    await refreshSyncIndicator()
+    void refreshLocalSyncIndicator().catch(() => {})
     toaster.create({ title: '记录已删除', type: 'success' })
     setEditorOpen(false)
     setEditingRecord(undefined)
@@ -437,23 +437,26 @@ export function RecordsPage() {
   }
 
   async function handleSyncClick() {
-    if (syncBusy || !isOnline) return
-    const checkingOnly = syncIndicator === 'none'
-    setSyncCheckIndicator(checkingOnly ? 'none' : undefined)
-    setSyncBusy(true)
+    if (syncBusy || syncChecking || syncSnapshot.connection === 'connecting') return
+    const cloud = currentCloud()
+    if (!cloud) {
+      setCredentialModalOpen(true)
+      return
+    }
+    const checkingOnly = syncSnapshot.connection !== 'connected' ||
+      syncSnapshot.checkError !== undefined || syncSnapshot.indicator === 'none'
+    setSyncChecking(checkingOnly)
+    // 只读连接不阻止本地操作；实际快照读写期间不允许并发编辑。
+    if (!checkingOnly) setSyncBusy(true)
     try {
       // 「已同步」是上一次只读检查的结果；再次点击只刷新这个结果。
       // 如果检查发现云端或本地有变化，留给用户下一次点击再执行真正同步。
-      if (syncIndicator === 'none') {
-        await refreshSyncIndicator()
+      if (checkingOnly) {
+        await refreshSharedSyncIndicator()
         return
       }
-
-      const cloud = currentCloud()
-      if (!cloud) {
-        setCloudBlocked(true)
-        return
-      }
+      // 不让同步前的后台检查在上传完成后回写过时的待上传结果。
+      cancelSyncCheck()
       const report = await syncCloud(storage, cloud, requestConflictConfirmation)
       let cleanupError: unknown
       if (report.outcome === 'downloaded' || report.outcome === 'synced') {
@@ -463,29 +466,9 @@ export function RecordsPage() {
           // 同步结果已经落库，图片清理失败不应回滚或遮蔽同步结果。
           cleanupError = error
         }
-        try {
-          await refreshRecords()
-        } catch (error) {
-          toaster.create({
-            title:
-              '刷新记录失败：' +
-              (error instanceof Error ? error.message : String(error)),
-            type: 'error',
-          })
-        }
-        try {
-          await refreshTypeTemplates()
-        } catch (error) {
-          toaster.create({
-            title:
-              '刷新类型模板失败：' +
-              (error instanceof Error ? error.message : String(error)),
-            type: 'error',
-          })
-        }
+        await refreshLocalViews()
       }
       reportCleanupError(cleanupError)
-      await refreshSyncIndicator()
       const resultTitles = {
         uploaded: '已更新云端',
         downloaded: '已更新本地',
@@ -503,21 +486,38 @@ export function RecordsPage() {
           type: 'error',
         })
       }
+      await refreshLocalSyncIndicator()
+      try {
+        await refreshSharedSyncIndicator()
+      } catch (error) {
+        toaster.create({ title: '状态检查失败：' + cloudErrorMessage(error), type: 'error' })
+      }
     } catch (error) {
-      setCloudBlocked(true)
+      reportSyncFailure(error)
       toaster.create({
-        title:
-          '同步失败：' +
-          (error instanceof Error ? error.message : String(error)),
+        title: (checkingOnly ? '' : '同步失败：') + cloudErrorMessage(error),
         type: 'error',
       })
+      if (!checkingOnly) {
+        // 下载逐月落库；后续请求失败时也要展示已落库部分，避免编辑旧快照。
+        await refreshLocalViews()
+        await refreshLocalSyncIndicator().catch(() => {})
+      }
     } finally {
-      setSyncBusy(false)
-      setSyncCheckIndicator(undefined)
+      if (!checkingOnly) setSyncBusy(false)
+      setSyncChecking(false)
     }
   }
 
-  const syncStatus = syncStatusView(syncCheckIndicator ?? syncIndicator)
+  const connecting = syncSnapshot.connection === 'connecting'
+  const syncStatus = syncSnapshot.connection === 'offline'
+    ? { icon: LuRefreshCwOff, label: '已离线' }
+    : connecting
+      ? { icon: LuRefreshCw, label: '连接中' }
+      : syncSnapshot.checkError !== undefined
+        ? { icon: LuRefreshCw, label: '检查失败' }
+        : syncStatusView(syncSnapshot.indicator)
+  const syncLabel = syncBusy && !syncChecking ? '同步中' : syncStatus.label
 
   return (
     <Box flex="1" minH="0" position="relative" display="flex" flexDirection="column">
@@ -558,18 +558,19 @@ export function RecordsPage() {
             w="24"
             px="sm"
             flexShrink={0}
-            aria-label={syncStatus.label}
-            aria-busy={syncBusy}
-            disabled={syncBusy || !isOnline || !configured}
+            color={connecting ? 'fg.muted' : 'fg'}
+            aria-label={syncLabel}
+            aria-busy={syncBusy || syncChecking || connecting}
+            disabled={syncBusy || syncChecking || connecting}
             onClick={() => void handleSyncClick()}
           >
-            {syncBusy ? (
+            {syncBusy || syncChecking || connecting ? (
               <Spinner size="sm" flexShrink={0} />
             ) : (
               <Icon as={syncStatus.icon} boxSize="5" />
             )}
             <Text textStyle="sm">
-              {syncCheckIndicator !== undefined ? syncStatus.label : syncBusy ? '同步中' : syncStatus.label}
+              {syncLabel}
             </Text>
           </Button>
         </Flex>
@@ -665,7 +666,7 @@ export function RecordsPage() {
         borderRadius="full"
         boxSize="12"
         aria-label="新建记录"
-        disabled={editorLoading}
+        disabled={editorLoading || syncBusy}
         onClick={() => void openNewRecord()}
       >
         <Icon as={LuPlus} boxSize="6" />

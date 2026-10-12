@@ -18,12 +18,21 @@ export type ImageManagerLease = {
   addStagedImages(images: StagedImagePreview[]): void
   /** 当前显示位置的图片加载失败时通知 manager。 */
   invalidateImage(imageId: string): void
+  /** 用户主动重新加载失败的图片，不改变记录引用。 */
+  retryImage(imageId: string): void
   /** 当前显示位置不再使用这些图片。 */
   release(): void
 }
 
 export type ImageManager = {
   createLease(onChange: ImageManagerChangeHandler): ImageManagerLease
+}
+
+export type ImageSources = {
+  sources: Record<string, ImageDisplaySource>
+  addStagedImages: (images: StagedImagePreview[]) => void
+  invalidateImage: (imageId: string) => void
+  retryImage: (imageId: string) => void
 }
 
 export type ImageManagerOptions = {

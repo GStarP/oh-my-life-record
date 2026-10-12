@@ -1,4 +1,4 @@
-/** 设置页：云端凭证入口、dark mode、图片清理与数据清空。 */
+/** 设置页：云端配置入口、dark mode、图片清理与数据清空。 */
 import { useState } from "react";
 import {
   Box,
@@ -11,11 +11,12 @@ import {
   Switch,
   Text,
 } from "@chakra-ui/react";
-import { useAtom } from "jotai";
-import { credentialAtom, syncBusyAtom } from "../../features/cloud/state";
+import { useAtom, useSetAtom } from "jotai";
+import { credentialAtom, credentialModalOpenAtom, syncBusyAtom } from "../../features/cloud/state";
+import { cloudErrorMessage } from "../../features/cloud/request-error";
+import { cancelSyncCheck, reportSyncFailure } from "../sync-indicator";
 import { colorModeAtom } from "../../features/preferences/state";
 import { toaster } from "../../features/notifications/toaster";
-import { CredentialModal } from "../../features/cloud/credential/credential-modal";
 import { getCredential, hasCredential } from "../../features/cloud/credential/credential";
 import { cleanupCloudImages } from "../../features/cloud/cleanup";
 import type { R2Config } from "../../features/cloud/cloud.type";
@@ -31,7 +32,7 @@ import type {
 function Section({ title, children }: SectionProps) {
   return (
     <Flex direction="column" gap="xs">
-      <Text px="xs" textStyle="xs" fontWeight="semibold" color="fg.muted">
+      <Text textStyle="xs" fontWeight="semibold" color="fg.muted">
         {title}
       </Text>
       <Box bg="bg.panel" rounded="lg" overflow="hidden">
@@ -95,7 +96,7 @@ export function SettingsPage() {
   const navigate = useNavigate();
   const [credential] = useAtom(credentialAtom);
   const [colorMode, setColorModeAtom] = useAtom(colorModeAtom);
-  const [modalOpen, setModalOpen] = useState(false);
+  const setModalOpen = useSetAtom(credentialModalOpenAtom);
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const [cleanupBusy, setCleanupBusy] = useState(false);
   const [resetConfig, setResetConfig] = useState<R2Config>();
@@ -108,11 +109,13 @@ export function SettingsPage() {
     if (syncBusy || resetBusy || cleanupBusy) return;
     const cloud = currentCloud();
     if (!cloud) {
-      toaster.create({ title: "请先配置云端凭证", type: "error" });
+      toaster.create({ title: "请先完成云端配置", type: "error" });
       setCleanupOpen(false);
       return;
     }
     setCleanupBusy(true);
+    setSyncBusy(true);
+    cancelSyncCheck();
     try {
       const deleted = await cleanupCloudImages(storage, cloud);
       toaster.create({
@@ -123,13 +126,15 @@ export function SettingsPage() {
         type: "success",
       });
     } catch (err) {
+      reportSyncFailure(err);
       toaster.create({
         title:
-          "清理失败：" + (err instanceof Error ? err.message : String(err)),
+          "清理失败：" + cloudErrorMessage(err),
         type: "error",
       });
     } finally {
       setCleanupBusy(false);
+      setSyncBusy(false);
       setCleanupOpen(false);
     }
   }
@@ -145,15 +150,17 @@ export function SettingsPage() {
     if (!resetConfig || resetConfirmation !== resetConfig.bucket || resetBusy || syncBusy || cleanupBusy) return;
     setResetBusy(true);
     setSyncBusy(true);
+    cancelSyncCheck();
     try {
       await clearAllData(resetConfig);
       // 刷新整个应用，避免记录页的 keep-alive 列表和图片内存缓存仍显示旧数据。
       window.location.reload();
     } catch (error) {
+      reportSyncFailure(error);
       setResetBusy(false);
       setSyncBusy(false);
       toaster.create({
-        title: "清空失败，请重试：" + (error instanceof Error ? error.message : String(error)),
+        title: "清空失败，请重试：" + cloudErrorMessage(error),
         type: "error",
       });
     }
@@ -164,11 +171,12 @@ export function SettingsPage() {
       <Flex direction="column" gap="xl">
         <Section title="云端">
           <SettingsActionRow
-            label="云端凭证"
+            label="云端配置"
+            disabled={cleanupBusy || syncBusy || resetBusy}
             onClick={() => setModalOpen(true)}
           />
           <SettingsActionRow
-            label="清理未引用图片"
+            label="清理垃圾"
             disabled={!configured || cleanupBusy || syncBusy || resetBusy}
             onClick={() => setCleanupOpen(true)}
           />
@@ -205,8 +213,6 @@ export function SettingsPage() {
         </Section>
       </Flex>
 
-      <CredentialModal open={modalOpen} onClose={() => setModalOpen(false)} />
-
       <Dialog.Root
         open={cleanupOpen}
         onOpenChange={(e) => {
@@ -227,7 +233,7 @@ export function SettingsPage() {
             aria-busy={cleanupBusy}
           >
             <Dialog.Header>
-              <Dialog.Title textStyle="md">清理未引用图片</Dialog.Title>
+              <Dialog.Title textStyle="md">清理垃圾</Dialog.Title>
             </Dialog.Header>
             <Dialog.Body>
               <Text textStyle="sm">

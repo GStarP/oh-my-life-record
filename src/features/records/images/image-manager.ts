@@ -2,7 +2,7 @@
  * 图片管理 module 的公共入口；应用只在 runtime 中创建一个实例。
  *
  * 调用方只提供图片 ID 和显示位置的生命周期；IndexedDB、Cache Storage、R2、
- * presigned URL、Object URL 和 LRU 都隐藏在内部实现之后。
+ * 本地签名 URL、Object URL 和 LRU 都隐藏在内部实现之后。
  */
 import { loadImageSource } from './image-pipeline'
 import { createImageResourceStore } from './image-resource-store'
@@ -87,6 +87,9 @@ export function createImageManager({
         },
         invalidateImage(imageId) {
           lease.invalidateImage(resourceKey(imageId))
+        },
+        retryImage(imageId) {
+          lease.retryImage(resourceKey(imageId))
         },
         release: lease.release,
       }

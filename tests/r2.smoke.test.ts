@@ -22,8 +22,8 @@ import type { R2Config } from '../src/features/cloud/cloud.type'
 import type { Manifest } from '../src/features/cloud/sync/engine.type'
 import type { LifeRecord } from '../src/features/records/type'
 
-// 只有显式使用 `--mode smoke` 才读取本地凭证文件；常规 `pnpm test`
-// 仍应跳过真实 R2，避免日常回归测试意外产生外部网络与云端写操作。
+// 只有 `--mode smoke` 才读取本地凭证文件；进程环境变量可用于显式注入。
+// 常规回归主动排除此文件，运行方式见 docs/开发验证.md。
 const smokeEnv = import.meta.env.MODE === 'smoke'
   ? loadEnv('smoke', process.cwd(), '')
   : {}
@@ -96,7 +96,6 @@ describe('R2 冒烟（真实云端，手动运行）', () => {
     // 端到端验证云端 JSON 序列化（ADR-0006）：写入一个 UTC+8 归属 9 月 1 日
     // 的跨月瞬间，读回必须仍是同一绝对瞬间（getTime 相等）且为 Date 对象。
     const c = adapter()
-    // 先快照现场 manifest：putManifest 是整体覆盖，结束时必须原样恢复
     // putManifest 是整体覆盖，因此先快照并在结束时恢复原始 manifest，
     // 避免冒烟测试影响隔离桶中已有的测试数据。
     originalManifest = await c.getManifest()
@@ -122,7 +121,7 @@ describe('R2 冒烟（真实云端，手动运行）', () => {
     // listImages 是「清理云端图片」功能（扫描云端全部图片）的数据基础：
     // 验证上传后出现在列表、删除后从列表消失。图片本体正确性由
     // 「签名 GET URL 真实可访问」用例端到端验证（接口无 getImage，
-    // 显示一律走签名 URL，见 cloud.type.ts 注释）。
+    // 未缓存的云端图片通过签名 URL 读取，见 cloud.type.ts 注释）。
     const c = adapter()
     const bytes = new TextEncoder().encode('R2 smoke image bytes - binary check').buffer
     await c.putImage(imageId, new Blob([bytes], { type: 'image/webp' }))

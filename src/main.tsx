@@ -13,11 +13,12 @@ applyColorMode(getStoredColorMode())
 function registerServiceWorker() {
   if (!import.meta.env.PROD || !('serviceWorker' in navigator)) return
 
-  window.addEventListener('load', () => {
-    void navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch((error: unknown) => {
-      // Service Worker 只负责离线壳；注册失败不应阻断在线应用本身。
-      console.warn('PWA 离线壳注册失败', error)
-    })
+  void navigator.serviceWorker.register('/sw.js', {
+    scope: '/',
+    updateViaCache: 'none',
+  }).catch((error: unknown) => {
+    // Service Worker 只负责离线壳；注册失败不应阻断在线应用本身。
+    console.warn('PWA 离线壳注册失败', error)
   })
 }
 

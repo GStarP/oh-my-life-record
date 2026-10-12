@@ -12,7 +12,7 @@
  *   images/{imageId}.webp        图片（不可变对象）
  *
  * 错误语义：
- * - 404（对象不存在）→ get* 返回 undefined（引擎按「云端无此月/无此图」处理）。
+ * - 404（对象不存在）→ get* 返回 undefined；NoSuchBucket 仍抛错，不能当空云端。
  * - 分片 JSON 损坏 → getPartitionFile 返回 undefined（引擎 brokenMonths：
  *   不覆盖本地、不中止同步；同步层会把该月份记录为损坏）；
  *   解码器一律抛错（具体原因在 Error 消息里），适配器在边界 catch 后
@@ -20,10 +20,12 @@
  * - manifest JSON 损坏 → 抛错（manifest 驱动全部同步决策，静默当空
  *   可能导致错误上传覆盖云端）。解码器消息只报具体问题，
  *   「云端 manifest.json」前缀由 getManifest 捕获处统一添加。
- * - 网络/HTTP 错误（非 404）→ 抛 R2HttpError（中文消息 + HTTP status + R2 code，供凭证验证分类）。
+ * - 网络失败 → TypeError；总时限 → CloudTimeoutError；HTTP 错误 → R2HttpError。
  */
 import { AwsClient } from 'aws4fetch'
-import { CloudRequestError } from '../request-error'
+import { CloudDataError, CloudRequestError } from '../request-error'
+import { cloudRequest } from '../request'
+import { cacheImageBlob } from '../../records/images/image-cache'
 import type { CloudAdapter, R2Config } from '../cloud.type'
 import type { TypeTemplatesFile } from '../../type-templates/type'
 import type { Manifest, PartitionFile } from '../sync/engine.type'
@@ -72,6 +74,8 @@ export class R2CloudAdapter implements CloudAdapter {
     this.client = new AwsClient({
       accessKeyId: config.accessKeyId,
       secretAccessKey: config.accessKeySecret,
+      // 重试由前台检查器管理；避免库内指数退避把一次连接拖成数分钟。
+      retries: 0,
     })
     const base = new URL(config.endpoint)
     base.pathname = base.pathname.replace(/\/+$/, '') + '/' + config.bucket + '/'
@@ -85,7 +89,7 @@ export class R2CloudAdapter implements CloudAdapter {
 
   /**
    * 统一签名请求。404 放行**仅限 GET**（调用方按「对象不存在」处理——
-   * 读路径的「无此对象」是正常状态）；PUT/DELETE 的 404 一律视为错误
+   * 读路径的「无此对象」是正常状态，NoSuchBucket 除外）；PUT/DELETE 的 404 一律视为错误
    * （如桶名写错时 R2 返回 NoSuchBucket——若静默放行，写入会被误报为
    * 成功，数据滞留本地且引擎照常置 dirty=false）。其余非 2xx 抛中文
    * 错误（含 R2 返回的响应体摘要，便于排查）。
@@ -98,18 +102,25 @@ export class R2CloudAdapter implements CloudAdapter {
   ): Promise<Response> {
     const headers: Record<string, string> = {}
     if (contentType) headers['Content-Type'] = contentType
-    const res = await this.client.fetch(this.baseUrl + key, { method, headers, body })
-    if (res.status === 404 && method === 'GET') return res
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '')
+    return cloudRequest(async (signal) => {
+      const res = await this.client.fetch(this.baseUrl + key, { method, headers, body, signal })
+      // 在同一时限内读完响应体；仅收到 HTTP headers 不代表请求已结束。
+      const bytes = await res.arrayBuffer()
+      const detail = res.ok ? '' : new TextDecoder().decode(bytes)
       const code = /<Code>([^<]+)<\/Code>/.exec(detail)?.[1]
-      throw new R2HttpError(
-        'R2 ' + method + ' ' + key + ' 失败（HTTP ' + res.status + '）：' + detail.slice(0, 200),
-        res.status,
-        code,
-      )
-    }
-    return res
+      if (!res.ok && !(res.status === 404 && method === 'GET' && code !== 'NoSuchBucket')) {
+        throw new R2HttpError(
+          'R2 ' + method + ' ' + key + ' 失败（HTTP ' + res.status + '）：' + detail.slice(0, 200),
+          res.status,
+          code,
+        )
+      }
+      return new Response([204, 205, 304].includes(res.status) ? null : bytes, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers,
+      })
+    })
   }
 
   // ---- manifest ----
@@ -120,7 +131,7 @@ export class R2CloudAdapter implements CloudAdapter {
       return decodeManifest(await res.text())
     } catch (err) {
       // 前缀统一在此添加：解码器只报具体问题
-      throw new Error('云端 manifest.json：' + (err instanceof Error ? err.message : String(err)))
+      throw new CloudDataError('云端 manifest.json：' + (err instanceof Error ? err.message : String(err)))
     }
   }
 
@@ -187,6 +198,8 @@ export class R2CloudAdapter implements CloudAdapter {
       body,
       blob.type || 'application/octet-stream',
     )
+    // 上传成功后暂存即会删除；尽力保留同一 Blob，避免刚上传的图片离线立即消失。
+    await cacheImageBlob(new URL(this.imageKey(imageId), this.baseUrl).toString(), blob)
   }
 
   async deleteImage(imageId: string): Promise<void> {
@@ -203,16 +216,7 @@ export class R2CloudAdapter implements CloudAdapter {
       url.searchParams.set('prefix', prefix)
       url.searchParams.set('encoding-type', 'url')
       if (continuationToken) url.searchParams.set('continuation-token', continuationToken)
-      const res = await this.client.fetch(url.toString(), { method: 'GET' })
-      if (!res.ok) {
-        const detail = await res.text().catch(() => '')
-        const code = /<Code>([^<]+)<\/Code>/.exec(detail)?.[1]
-        throw new R2HttpError(
-          'R2 列出对象失败（HTTP ' + res.status + '）：' + detail.slice(0, 200),
-          res.status,
-          code,
-        )
-      }
+      const res = await this.signedRequest('GET', url.search)
       const xml = await res.text()
       if (!/<ListBucketResult\b[^>]*>[\s\S]*<\/ListBucketResult>\s*$/.test(xml)) {
         throw new Error('R2 对象清单无效')

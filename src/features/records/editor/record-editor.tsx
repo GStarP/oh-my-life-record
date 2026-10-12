@@ -61,6 +61,7 @@ function resizeTextarea(element: HTMLTextAreaElement | null) {
 function EditableImage({
   source,
   onError,
+  onRetry,
   onRemove,
 }: EditableImageProps) {
   return (
@@ -76,6 +77,8 @@ function EditableImage({
         boxSize="full"
         borderRadius="lg"
         onError={onError}
+        unavailable={source?.kind === "error"}
+        onRetry={onRetry}
       />
       <IconButton
         type="button"
@@ -142,6 +145,7 @@ export function RecordEditor({
     sources: imageSources,
     addStagedImages,
     invalidateImage,
+    retryImage,
   } = useImageSources(imageManager, imageIds, open);
 
   useEffect(() => {
@@ -481,7 +485,7 @@ export function RecordEditor({
                         disabled={imageUploading}
                         onClick={() => imageInputRef.current?.click()}
                       >
-                        {imageUploading ? <Spinner size="sm" /> : "上传"}
+                        {imageUploading ? <Spinner size="sm" /> : "添加图片"}
                       </Button>
                     </Flex>
                     <Input
@@ -507,6 +511,7 @@ export function RecordEditor({
                               key={imageId}
                               source={source}
                               onError={() => invalidateImage(imageId)}
+                              onRetry={() => retryImage(imageId)}
                               onRemove={() => setDeleteTarget({ kind: "image", id: imageId })}
                             />
                           );

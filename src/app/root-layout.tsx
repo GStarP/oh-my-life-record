@@ -1,19 +1,19 @@
 /**
- * 根布局：底部 tab（记录/设置）+ 全局云端配置阻断弹窗。
+ * 根布局：底部 tab、用户主动打开的连接面板及前台检查生命周期。
  * 记录页和设置页由这里持有，路由切换只改变可见性，不卸载页面。
  */
 import { Box, Flex, Icon, Link } from '@chakra-ui/react'
 import { Link as RouterLink, Outlet, useRouterState } from '@tanstack/react-router'
-import { useSetAtom, useAtomValue } from 'jotai'
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { useAtom, useAtomValue } from 'jotai'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { LuClipboardList, LuSettings } from 'react-icons/lu'
 import {
-  cloudBlockedAtom,
-  configuredAtom,
-  onlineAtom,
+  credentialAtom,
+  credentialModalOpenAtom,
+  syncBusyAtom,
 } from '../features/cloud/state'
 import { CredentialModal } from '../features/cloud/credential/credential-modal'
-import { startSyncIndicatorMonitor } from './sync-indicator'
+import { resetSyncIndicator, startSyncIndicatorMonitor } from './sync-indicator'
 import { cleanupLocalOrphanImages } from '../features/records/images/image-staging'
 import { storage } from './runtime'
 import type { TabLinkProps } from './root-layout.type'
@@ -61,9 +61,11 @@ function TabLink({
 }
 
 export function RootLayout() {
-  const configured = useAtomValue(configuredAtom)
-  const setCloudBlocked = useSetAtom(cloudBlockedAtom)
-  const setOnline = useSetAtom(onlineAtom)
+  const credential = useAtomValue(credentialAtom)
+  const [modalOpen, setModalOpen] = useAtom(credentialModalOpenAtom)
+  const syncBusy = useAtomValue(syncBusyAtom)
+  const busyRef = useRef(syncBusy)
+  busyRef.current = syncBusy
   const { location } = useRouterState()
   const recordsVisible = location.pathname === '/records'
   const settingsVisible = location.pathname === '/settings'
@@ -77,24 +79,9 @@ export function RootLayout() {
   }, [recordsVisible, settingsVisible])
 
   useEffect(() => {
-    const updateConnectivity = () => {
-      const online = window.navigator.onLine
-      // 这里只更新联网状态；是否阻断由检查器在等待与重试后决定。
-      setOnline(online)
-    }
-    updateConnectivity()
-    window.addEventListener('online', updateConnectivity)
-    window.addEventListener('offline', updateConnectivity)
-    return () => {
-      window.removeEventListener('online', updateConnectivity)
-      window.removeEventListener('offline', updateConnectivity)
-    }
-  }, [setOnline])
-
-  useEffect(() => {
-    if (!configured) return
-    return startSyncIndicatorMonitor(() => setCloudBlocked(true))
-  }, [configured, setCloudBlocked])
+    resetSyncIndicator()
+    return startSyncIndicatorMonitor(() => busyRef.current)
+  }, [credential])
 
   useEffect(() => {
     // 本地图片孤儿清理属于应用启动兜底，不应依赖用户是否先进入记录页。
@@ -184,8 +171,7 @@ export function RootLayout() {
           />
         </Flex>
       </Box>
-      {/* 无完整凭证或云端异常 → 全屏弹窗，必须重新验证才能继续使用。 */}
-      {!configured && <CredentialModal force />}
+      <CredentialModal open={modalOpen} onClose={() => setModalOpen(false)} />
     </Box>
   )
 }

@@ -5,6 +5,8 @@ export type RecordImageProps = {
   boxSize: ImageProps['boxSize']
   borderRadius?: ImageProps['borderRadius']
   onError: () => void
+  unavailable: boolean
+  onRetry: () => void
 }
 
 export type ImagePreviewProps = {

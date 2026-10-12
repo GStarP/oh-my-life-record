@@ -1,9 +1,4 @@
-/**
- * CloudAdapter：同步引擎访问云端的唯一接口（Cloudflare R2，见 ADR-0001）。
- *
- * 真实实现用本地 SigV4 签名访问 R2；内存测试替身（tests/helpers）供同步引擎
- * 单元测试使用。接口同样由「同步引擎需要什么」决定。
- */
+/** 云端快照与图片的读写接口；由 R2 实现和内存测试替身共同使用。 */
 import type { Manifest, PartitionFile } from './sync/engine.type'
 import type { TypeTemplatesFile } from '../type-templates/type'
 
@@ -35,8 +30,7 @@ export interface CloudAdapter {
   putTypeTemplatesFile(file: TypeTemplatesFile): Promise<void>
 
   // ---- 图片对象 ----
-  // 注意：没有 getImage——图片展示一律走签名 GET URL（getSignedGetUrl，
-  // 见 docs/设计文档.md §6.2）；「图片清理」只扫描 listImages。
+  // 已上传图片经 getSignedGetUrl 交给图片管线读取缓存或下载，无独立 getImage。
   putImage(imageId: string, blob: Blob): Promise<void>
   deleteImage(imageId: string): Promise<void>
   /** 列出云端全部图片对象 ID（「图片清理」功能用）。 */

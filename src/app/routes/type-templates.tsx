@@ -12,10 +12,11 @@ import {
 } from "@chakra-ui/react";
 import { useNavigate } from "@tanstack/react-router";
 import { useAtomValue } from "jotai";
+import { syncBusyAtom } from "../../features/cloud/state";
 import { LuArrowLeft, LuPlus } from "react-icons/lu";
 import { storage } from "../runtime";
 import { toaster } from "../../features/notifications/toaster";
-import { refreshSyncIndicator } from "../sync-indicator";
+import { refreshLocalSyncIndicator } from "../sync-indicator";
 import { TypeTemplateEditor } from "../../features/type-templates/template-editor";
 import {
   typeTemplateDataAtom,
@@ -29,6 +30,7 @@ import { TypeTemplateTile } from "../../features/type-templates/template-tile";
 export function TypeTemplatesPage() {
   const navigate = useNavigate();
   const templateData = useAtomValue(typeTemplateDataAtom);
+  const syncBusy = useAtomValue(syncBusyAtom);
   const { templates } = templateData;
   const [workflow] = useState<TypeTemplateWorkflow>(() =>
     createTypeTemplateWorkflow({ storage }),
@@ -66,11 +68,13 @@ export function TypeTemplatesPage() {
   }, [workflow]);
 
   function openNew() {
+    if (syncBusy) return;
     setEditing(undefined);
     setEditorOpen(true);
   }
 
   function openEdit(template: RecordTypeTemplate) {
+    if (syncBusy) return;
     setEditing(template);
     setEditorOpen(true);
   }
@@ -86,7 +90,7 @@ export function TypeTemplatesPage() {
     }));
     setEditorOpen(false);
     setEditing(undefined);
-    void refreshSyncIndicator().catch(() => {});
+    void refreshLocalSyncIndicator().catch(() => {});
     toaster.create({ title: "类型模板已保存", type: "success" });
   }
 
@@ -100,7 +104,7 @@ export function TypeTemplatesPage() {
     }));
     setEditorOpen(false);
     setEditing(undefined);
-    void refreshSyncIndicator().catch(() => {});
+    void refreshLocalSyncIndicator().catch(() => {});
     toaster.create({ title: "类型模板已删除", type: "success" });
   }
 
@@ -127,6 +131,7 @@ export function TypeTemplatesPage() {
           <Button
             variant="subtle"
             justifySelf="end"
+            disabled={syncBusy}
             onClick={openNew}
           >
             <Icon as={LuPlus} />

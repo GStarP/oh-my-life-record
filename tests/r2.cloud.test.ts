@@ -10,6 +10,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AwsClient } from 'aws4fetch'
 import { R2CloudAdapter } from '../src/features/cloud/r2/r2'
+import { CloudDataError, CloudRequestError } from '../src/features/cloud/request-error'
 import { SCHEMA_VERSION } from '../src/features/cloud/r2/schema'
 import type { LifeRecord } from '../src/features/records/type'
 import type { Manifest, PartitionFile } from '../src/features/cloud/sync/engine.type'
@@ -35,6 +36,27 @@ function objectListXml(keys: string[], nextToken?: string): string {
     (nextToken ? `<NextContinuationToken>${nextToken.replaceAll('&', '&amp;')}</NextContinuationToken>` : '') +
     '</ListBucketResult>'
 }
+
+describe('R2 读取失败边界', () => {
+  it('只把缺少对象当空云端；桶不存在与损坏清单必须明确拒绝', async () => {
+    // 无凭证记录后首次连接空桶是正常路径，但已保存凭证对应的桶可能被删。
+    // 同为 404 的 NoSuchBucket 不能被当成“空桶可上传”；清单损坏也不能
+    // 返回 undefined，否则会误导同步决策。测试拦截所有请求，不访问真实 R2。
+    const request = vi.spyOn(AwsClient.prototype, 'fetch')
+      .mockResolvedValueOnce(new Response('<Error><Code>NoSuchKey</Code></Error>', { status: 404 }))
+      .mockResolvedValueOnce(new Response('<Error><Code>NoSuchBucket</Code></Error>', { status: 404 }))
+      .mockResolvedValueOnce(new Response('invalid manifest'))
+    const cloud = new R2CloudAdapter({ endpoint: 'https://read.invalid', bucket: 'test',
+      accessKeyId: 'test', accessKeySecret: 'test' })
+    try {
+      await expect(cloud.getManifest()).resolves.toBeUndefined()
+      await expect(cloud.getManifest()).rejects.toBeInstanceOf(CloudRequestError)
+      await expect(cloud.getManifest()).rejects.toBeInstanceOf(CloudDataError)
+    } finally {
+      request.mockRestore()
+    }
+  })
+})
 
 describe('云端清空', () => {
   it('删除全部应用对象，中断后可重试，重复执行也成功', async () => {

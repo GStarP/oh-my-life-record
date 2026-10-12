@@ -14,6 +14,7 @@ export type RecordEditorValues = {
 export type EditableImageProps = {
   source: ImageDisplaySource | undefined
   onError: () => void
+  onRetry: () => void
   onRemove: () => void
 }
 

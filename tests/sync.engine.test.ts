@@ -253,23 +253,28 @@ describe('sync：冲突一票否决', () => {
 
   it('冲突且取消 → 整体中止，本地与云端零变更，返回 aborted', async () => {
     // 用户拒绝云端覆盖时，一票否决必须发生在任何上传或下载之前；
-    // 本地记录、dirty、云端分片和 manifest 都应保持原状。
+    // 首次无凭证记录的已确认版本为 0；后来连接已有同月数据的桶也必须
+    // 确认冲突。取消后本地记录、模板、待上传图片、dirty 及云端都保持原状。
     const storage = new InMemoryStorage()
     const cloud = new InMemoryCloud()
-    await storage.upsertRecord(recordFixture('local', '2026-08-02T10:00:00+08:00'))
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 3,
-      dirty: true,
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
+    await storage.upsertRecordAndMarkDirty(
+      recordFixture('local', '2026-08-02T10:00:00+08:00', { images: ['pending'] }),
+      ['2026-08'],
+    )
+    await storage.putImageBlob('pending', new Blob(['pending image']))
+    await storage.putTypeTemplateAndMarkDirty({ type: '本地模板', icon: 'wallet', attributes: [] })
+    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 1, partitions: { '2026-08': 5 } })
     await cloud.putPartitionFile({
       month: '2026-08',
       revision: 5,
       records: [recordFixture('cloud', '2026-08-10T10:00:00+08:00')],
     })
 
-    const result = await sync(storage, cloud, async () => false)
+    const result = await sync(storage, cloud, async (months, templatesConflict) => {
+      expect(months).toEqual(['2026-08'])
+      expect(templatesConflict).toBe(true)
+      return false
+    })
 
     expect(result.outcome).toBe('aborted')
     // 本地修改未被覆盖、dirty 保持。
@@ -282,6 +287,11 @@ describe('sync：冲突一票否决', () => {
       (await cloud.getPartitionFile('2026-08'))?.records.map((r) => r.id),
     ).toEqual(['cloud'])
     expect((await cloud.getManifest())?.partitions['2026-08']).toBe(5)
+    expect((await storage.getPartitionState('2026-08'))?.remoteRevision).toBe(0)
+    expect(await storage.getImageBlob('pending')).toBeDefined()
+    expect(await cloud.listImages()).toEqual([])
+    expect((await storage.getTypeTemplates()).map((template) => template.type)).toEqual(['本地模板'])
+    expect((await storage.getTypeTemplateState())?.dirty).toBe(true)
   })
 })
 

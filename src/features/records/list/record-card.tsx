@@ -64,7 +64,7 @@ function AttributeTags({ record }: RecordAttributeTagsProps) {
 
 export function RecordCard({ record, onOpen, imageManager }: RecordCardProps) {
   const pointerInteraction = useRef(false)
-  const { sources: imageSources, invalidateImage } = useImageSources(
+  const { sources: imageSources, invalidateImage, retryImage } = useImageSources(
     imageManager,
     record.images,
   )
@@ -174,6 +174,8 @@ export function RecordCard({ record, onOpen, imageManager }: RecordCardProps) {
                   }
                   boxSize="16"
                   onError={() => invalidateImage(imageId)}
+                  unavailable={imageSources[imageId]?.kind === 'error'}
+                  onRetry={() => retryImage(imageId)}
                 />
               ))}
             </Flex>

@@ -218,6 +218,14 @@ export function createImageResourceStore(
         touch(entry)
         notifyImage(id)
       },
+      retryImage(id) {
+        if (state.released || !state.ids.has(id)) return
+        const entry = entries.get(id)
+        if (!entry || entry.loading || entry.source?.kind !== 'error') return
+        entry.source = undefined
+        notifyImage(id)
+        startLoading(id, entry)
+      },
       release() {
         if (state.released) return
         updateLease(state, [])

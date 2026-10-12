@@ -11,7 +11,7 @@ import {
   hasCredential,
 } from '../features/cloud/credential/credential'
 import { createImageManager } from '../features/records/images/image-manager'
-import { clearImageCache } from '../features/records/images/image-pipeline'
+import { clearImageCache } from '../features/records/images/image-cache'
 import type { ImageManager } from '../features/records/images/image-manager.type'
 
 /** 本地存储单例（生产数据库名）。 */
@@ -39,7 +39,7 @@ function sameCredential(left: R2Config | undefined, right: R2Config): boolean {
 
 /**
  * 按当前凭证取得 R2 适配器；凭证未变化时复用同一个实例，凭证变化时重建。
- * 无完整凭证返回 undefined（调用方应提示用户完成云端配置）。
+ * 无可用凭证返回 undefined；不影响本地记录和图片暂存。
  */
 export function currentCloud(): R2CloudAdapter | undefined {
   const credential = getCredential()
@@ -50,7 +50,12 @@ export function currentCloud(): R2CloudAdapter | undefined {
   }
   if (!cachedCloud || !sameCredential(cachedCredential, credential)) {
     cachedCredential = credential
-    cachedCloud = new R2CloudAdapter(credential)
+    try {
+      cachedCloud = new R2CloudAdapter(credential)
+    } catch {
+      // 本地凭证损坏时也允许进入应用，由用户主动打开连接面板修复。
+      cachedCloud = undefined
+    }
   }
   return cachedCloud
 }

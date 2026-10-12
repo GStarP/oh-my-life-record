@@ -5,4 +5,4 @@ export type CredentialVerifier = Pick<CloudAdapter, 'listImages'>
 
 export type VerifyResult =
   | { ok: true }
-  | { ok: false; kind: 'invalid' | 'no-network' }
+  | { ok: false; kind: 'invalid' | 'no-network'; message: string }
