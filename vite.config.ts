@@ -1,43 +1,39 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
+import { VitePWA } from 'vite-plugin-pwa'
 import { createHash } from 'node:crypto'
-import { readdir, readFile, writeFile } from 'node:fs/promises'
-import { resolve, relative, sep } from 'node:path'
-import type { Plugin } from 'vite'
-
-/** HTML、入口和所有懒加载资源使用同一个内容版本，安装不依赖页面访问顺序。 */
-function offlineShell(): Plugin {
-  let outDir: string
-  let workerTemplate: string
-  return {
-    name: 'offline-shell',
-    apply: 'build',
-    configResolved(config) {
-      outDir = resolve(config.root, config.build.outDir)
-      workerTemplate = resolve(config.publicDir, 'sw.js')
-    },
-    async closeBundle() {
-      const entries = await readdir(outDir, { recursive: true, withFileTypes: true })
-      const files = entries.filter((entry) => entry.isFile() && entry.name !== 'sw.js')
-        .map((entry) => resolve(entry.parentPath, entry.name)).sort()
-      const hash = createHash('sha256')
-      const assets = await Promise.all(files.map(async (file) => {
-        const url = '/' + relative(outDir, file).split(sep).join('/')
-        const integrity = 'sha256-' + createHash('sha256').update(await readFile(file)).digest('base64')
-        return { url, integrity }
-      }))
-      for (const asset of assets) hash.update(asset.url).update(asset.integrity)
-      const template = await readFile(workerTemplate, 'utf8')
-      hash.update(template)
-      await writeFile(resolve(outDir, 'sw.js'), template
-        .replace('__BUILD_VERSION__', hash.digest('hex').slice(0, 16))
-        .replace('/* __PRECACHE_ASSETS__ */ []', JSON.stringify(assets)))
-    },
-  }
-}
+import { readFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
 
 export default defineConfig({
-  plugins: [react(), offlineShell()],
+  plugins: [react(), VitePWA({
+    strategies: 'injectManifest',
+    srcDir: 'src/app',
+    filename: 'sw.ts',
+    // 注册仍由 main.tsx 负责，保持已安装客户端使用的 /sw.js 地址与升级行为。
+    injectRegister: false,
+    manifest: false,
+    injectManifest: {
+      globPatterns: ['**/*.{html,js,css,png,svg,ico,webmanifest,woff2}'],
+      rollupFormat: 'iife',
+    },
+    integration: {
+      configureOptions(config, options) {
+        options.injectManifest!.manifestTransforms = [async (entries) => ({
+          manifest: await Promise.all(entries.map(async (entry) => ({
+            ...entry,
+            // 版本号负责缓存查找；SRI 另行验证下载正文，拒绝部署切换中的混合版本。
+            integrity: 'sha256-' + createHash('sha256')
+              .update(await readFile(resolve(config.root, config.build.outDir, entry.url)))
+              .digest('base64'),
+            // 磁盘文件名与公开 URL 分开：导航与预缓存统一使用规范入口 /。
+            url: entry.url === 'index.html' ? '/' : '/' + entry.url,
+          }))),
+          warnings: [],
+        })]
+      },
+    },
+  })],
   test: {
     // 同步引擎与适配器均为纯 TS 逻辑，无需浏览器环境（jsdom）
     environment: 'node',
