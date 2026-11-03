@@ -4,13 +4,19 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview",
-    "test": "vitest run",
-    "test:pwa": "node --test tests/pwa-browser.mjs"
+    "test": "vitest run && node --test tests/release.mjs",
+    "android:sync": "pnpm build && cap sync android",
+    "android:open": "cap open android",
+    "android:build": "pnpm android:sync && cd android && ./gradlew :app:assembleDebug",
+    "android:package": "node tools/package-apk.mjs",
+    "test:android": "node --test --test-concurrency=1 tests/android-native.mjs tests/android-transfer.mjs",
+    "release:review": "node tools/release/review.mjs",
+    "release": "pnpm android:package && pnpm release:review"
   },
   "dependencies": {
+    "@capacitor/android": "8.5.3",
+    "@capacitor/core": "8.5.3",
     "@chakra-ui/react": "^3.36.1",
     "@date-fns/utc": "^2.1.1",
     "@emotion/react": "^11.14.0",
@@ -29,17 +35,17 @@
     "use-long-press": "3.3.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.5.3",
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
-    "fake-indexeddb": "^6.2.5",
     "playwright": "^1.64.1",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",
-    "vite-plugin-pwa": "^2.0.0",
-    "vitest": "^4.1.10",
-    "workbox-precaching": "^7.4.1",
-    "workbox-routing": "^7.4.1"
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=24"
   }
 }

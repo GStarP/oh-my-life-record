@@ -8,7 +8,6 @@ import {
 import type { LongPressPointerHandlers } from 'use-long-press'
 import { RecordImage } from '../images/record-image'
 import { formatTimeOfDay } from '../../../utils/time'
-import { useImageSources } from '../images/use-image-sources'
 import type {
   RecordAttributeTagsProps,
   RecordCardProps,
@@ -62,14 +61,9 @@ function AttributeTags({ record }: RecordAttributeTagsProps) {
   )
 }
 
-export function RecordCard({ record, onOpen, imageManager }: RecordCardProps) {
+export function RecordCard({ record, onOpen, imageStore }: RecordCardProps) {
   const pointerInteraction = useRef(false)
-  const { sources: imageSources, invalidateImage, retryImage } = useImageSources(
-    imageManager,
-    record.images,
-  )
-  // 鼠标、触控板、触摸屏和手写笔都可能产生 PointerEvent；只交给成熟库
-  // 统一处理按压与移动取消，不按 pointerType 过滤，避免桌面长按失效。
+  // 统一处理长按、滑动取消与触笔操作。
   const longPressBind = useLongPress<HTMLElement>(() => onOpen(record), {
     threshold: LONG_PRESS_MS,
     detect: LongPressEventType.Pointer,
@@ -167,15 +161,9 @@ export function RecordCard({ record, onOpen, imageManager }: RecordCardProps) {
               {record.images.map((imageId) => (
                 <RecordImage
                   key={imageId}
-                  src={
-                    imageSources[imageId]?.kind === 'ready'
-                      ? imageSources[imageId].url
-                      : undefined
-                  }
+                  imageId={imageId}
+                  imageStore={imageStore}
                   boxSize="16"
-                  onError={() => invalidateImage(imageId)}
-                  unavailable={imageSources[imageId]?.kind === 'error'}
-                  onRetry={() => retryImage(imageId)}
                 />
               ))}
             </Flex>

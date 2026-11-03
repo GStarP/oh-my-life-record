@@ -1,10 +1,3 @@
-/**
- * 云端凭证配置弹窗（全屏）。
- *
- * 仅由用户打开，允许空表单取消；断网与验证失败不阻断本地使用。
- *
- * 表单草稿实时写入 localStorage，但只有真实连接验证成功才会进入可用凭证 atom。
- */
 import { useEffect, useRef, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import {
@@ -14,10 +7,11 @@ import {
   Field,
   Flex,
   Icon,
+  IconButton,
   Input,
   Spinner,
 } from '@chakra-ui/react'
-import { LuDatabase } from 'react-icons/lu'
+import { LuDatabase, LuX } from 'react-icons/lu'
 import { useAtom } from 'jotai'
 import { credentialAtom } from '../state'
 import { cloudErrorMessage } from '../request-error'
@@ -99,7 +93,7 @@ export function CredentialModal({
     const serialized = JSON.stringify(draft)
     if (serialized === lastPersisted.current) return
     lastPersisted.current = serialized
-    setCredentialDraft(draft)
+    void setCredentialDraft(draft).catch(() => {})
   }, [
     open,
     values.endpoint,
@@ -116,7 +110,7 @@ export function CredentialModal({
       const result = await verifyCredential(new R2CloudAdapter(full))
       if (generation !== validationGeneration.current) return
       if (result.ok) {
-        setCredential(full)
+        await setCredential(full)
         setAtomCredential(full)
         setState('idle')
         onClose()
@@ -134,7 +128,7 @@ export function CredentialModal({
   }
 
   function handleCancel() {
-    // 同步失效本轮验证：取消之后，即使旧请求成功也不能保存凭证或弹 toast。
+    // 同步失效本轮验证：取消后不允许过期请求保存凭证或显示提示。
     validationGeneration.current++
     setState('idle')
     onClose()
@@ -161,6 +155,21 @@ export function CredentialModal({
           overflowY="auto"
           bg="bg.muted"
         >
+          <Dialog.CloseTrigger asChild>
+            <IconButton
+              type="button"
+              aria-label="关闭云端配置"
+              variant="ghost"
+              position="fixed"
+              top="md"
+              right="md"
+              boxSize="12"
+              rounded="full"
+              zIndex="1"
+            >
+              <Icon as={LuX} boxSize="5" />
+            </IconButton>
+          </Dialog.CloseTrigger>
           <Flex flex="1" />
           <Flex
             as="form"
@@ -223,7 +232,7 @@ export function CredentialModal({
                   variant="subtle"
                   bg="bg.panel"
                   rounded="sm"
-                  placeholder="omlr-test"
+                  placeholder="omlr"
                   {...register('bucket', {
                     required: true,
                     validate: (value) => value.trim().length > 0,
@@ -238,9 +247,6 @@ export function CredentialModal({
                 disabled={!isValid || state === 'verifying'}
               >
                 {state === 'verifying' ? <Spinner boxSize="4" /> : '连接'}
-              </Button>
-              <Button type="button" variant="ghost" onClick={handleCancel}>
-                取消
               </Button>
             </Flex>
           </Flex>

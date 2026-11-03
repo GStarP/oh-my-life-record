@@ -1,707 +1,227 @@
-/**
- * 记录页：按月加载、按天分组、虚拟滚动与记录编辑入口。
- *
- * 页面只编排状态和组件；记录写入/删除通过 record workflow 完成，全局同步
- * 通过 sync engine 完成。页面不直接修改 partitionState。
- */
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useRouterState } from '@tanstack/react-router'
-import {
-  Box,
-  Button,
-  Flex,
-  Icon,
-  Input,
-  InputGroup,
-  Spinner,
-  Text,
-} from '@chakra-ui/react'
-import {
-  LuArrowDownUp,
-  LuCloudDownload,
-  LuCloudUpload,
-  LuPlus,
-  LuRefreshCw,
-  LuRefreshCwOff,
-  LuSearch,
-} from 'react-icons/lu'
+import { Box, Button, Flex, Icon, Input, InputGroup, Spinner, Text } from '@chakra-ui/react'
+import { LuPlus, LuRefreshCw, LuSearch } from 'react-icons/lu'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
-import { currentCloud, imageManager, storage } from '../runtime'
-import {
-  credentialModalOpenAtom,
-  syncBusyAtom,
-} from '../../features/cloud/state'
-import {
-  BrokenMonthsDialog,
-  ConflictDialog,
-} from '../../features/cloud/sync/dialog'
-import type {
-  ConflictDialogState,
-  ConflictItem,
-} from '../../features/cloud/sync/dialog.type'
-import { sync as syncCloud } from '../../features/cloud/sync/engine'
-import { toaster } from '../../features/notifications/toaster'
-import {
-  cancelSyncCheck,
-  getSyncSnapshot,
-  refreshLocalSyncIndicator,
-  reportSyncFailure,
-  refreshSyncIndicator as refreshSharedSyncIndicator,
-  subscribeSyncIndicator,
-} from '../sync-indicator'
+import { currentCloud, imageStore, storage, syncContext } from '../runtime'
+import { credentialModalOpenAtom, syncBusyAtom, syncProgressAtom } from '../../features/cloud/state'
+import { ConflictDialog, SyncProgressDialog } from '../../features/cloud/sync/dialog'
+import type { ConflictDialogState } from '../../features/cloud/sync/dialog.type'
+import { sync } from '../../features/cloud/sync/engine'
+import { createSyncProgressDisplay } from '../../features/cloud/sync/progress'
 import { cloudErrorMessage } from '../../features/cloud/request-error'
-import { cleanupLocalOrphanImages, stageImageFiles } from '../../features/records/images/image-staging'
-import { loadInitialRecords, loadOlderRecords } from '../../features/records/list/record-data'
-import {
-  getRecordData,
-  recordDataAtom,
-  updateRecordData,
-} from '../../features/records/list/record-data-state'
+import { toaster } from '../../features/notifications/toaster'
+import { pickImages } from '../../features/records/images/image-import'
+import type { DraftImage } from '../../features/records/images/image-import.type'
 import { filterRecordsByType, groupRecordsByDay } from '../../features/records/list/record-list'
 import { RecordCard, RecordDayHeader } from '../../features/records/list/record-card'
 import { RecordEditor } from '../../features/records/editor/record-editor'
 import { createRecordWorkflow } from '../../features/records/record-workflow'
 import { TypeTemplatePicker } from '../../features/type-templates/template-picker'
-import {
-  typeTemplateDataAtom,
-  updateTypeTemplateData,
-} from '../../features/type-templates/state'
+import { typeTemplateDataAtom, updateTypeTemplateData } from '../../features/type-templates/state'
 import { createTypeTemplateWorkflow } from '../../features/type-templates/workflow'
-import type { TypeTemplateWorkflow } from '../../features/type-templates/workflow.type'
-import { previousMonth } from '../../utils/time'
 import type { LifeRecord } from '../../features/records/type'
 import type { RecordTypeTemplate } from '../../features/type-templates/type'
 import type { RecordListItem } from '../../features/records/list/record-list.type'
-import type { SyncIndicator } from '../../features/cloud/sync/engine.type'
-
-function sortRecords(records: Iterable<LifeRecord>): LifeRecord[] {
-  return [...records].sort(
-    (left, right) =>
-      right.time.getTime() - left.time.getTime() || right.id.localeCompare(left.id),
-  )
-}
+import type { RecordPage } from '../../features/storage/type'
 
 function mergeRecords(current: LifeRecord[], incoming: LifeRecord[]): LifeRecord[] {
   const byId = new Map(current.map((record) => [record.id, record]))
   for (const record of incoming) byId.set(record.id, record)
-  return sortRecords(byId.values())
+  return [...byId.values()].sort((a, b) => b.time.getTime() - a.time.getTime() || (a.id < b.id ? 1 : -1))
 }
-
-function flattenGroups(items: ReturnType<typeof groupRecordsByDay>): RecordListItem[] {
-  const flattened: RecordListItem[] = []
-  for (const group of items) {
-    flattened.push({ kind: 'day', group })
-    for (const record of group.records) flattened.push({ kind: 'record', record })
-  }
-  return flattened
-}
-
-function syncStatusView(indicator: SyncIndicator) {
-  switch (indicator) {
-    case 'upload':
-      return { icon: LuCloudUpload, label: '待上传' }
-    case 'download':
-      return { icon: LuCloudDownload, label: '有更新' }
-    case 'both':
-      return { icon: LuArrowDownUp, label: '需同步' }
-    default:
-      return { icon: LuRefreshCw, label: '已同步' }
-  }
-}
-
 export function RecordsPage() {
-  const visible = useRouterState({
-    select: (state) => state.location.pathname === '/records',
-  })
-  const recordData = useAtomValue(recordDataAtom)
+  const visible = useRouterState({ select: (state) => state.location.pathname === '/records' })
   const typeTemplates = useAtomValue(typeTemplateDataAtom).templates
-  const { records, nextMonth } = recordData
-  const initialLoading =
-    recordData.initialStatus === 'idle' || recordData.initialStatus === 'loading'
-  const loadError =
-    recordData.initialStatus === 'error' ? recordData.initialError : undefined
-  const olderLoading = recordData.olderStatus === 'loading'
-  const olderLoadError =
-    recordData.olderStatus === 'error' ? recordData.olderError : undefined
+  const [page, setPage] = useState<RecordPage>({ records: [] })
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string>()
   const [filterInput, setFilterInput] = useState('')
   const [filter, setFilter] = useState('')
   const [syncBusy, setSyncBusy] = useAtom(syncBusyAtom)
-  const [syncChecking, setSyncChecking] = useState(false)
-  const [conflictDialog, setConflictDialog] = useState<ConflictDialogState>()
-  const [brokenMonths, setBrokenMonths] = useState<string[]>()
+  const [progress, setProgress] = useAtom(syncProgressAtom)
+  const [conflict, setConflict] = useState<ConflictDialogState>()
   const [editorOpen, setEditorOpen] = useState(false)
-  const [editingRecord, setEditingRecord] = useState<LifeRecord | undefined>()
-  const [editorInitialType, setEditorInitialType] = useState<string | undefined>()
-  const [editorTemplate, setEditorTemplate] = useState<RecordTypeTemplate | undefined>()
-  const [templatePickerOpen, setTemplatePickerOpen] = useState(false)
+  const [editingRecord, setEditingRecord] = useState<LifeRecord>()
+  const [editorTemplate, setEditorTemplate] = useState<RecordTypeTemplate>()
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [editorLoading, setEditorLoading] = useState(false)
   const [referenceTime, setReferenceTime] = useState(() => new Date())
-  const loadReferenceTimeRef = useRef(new Date())
-  const scrollRef = useRef<HTMLDivElement | null>(null)
-  const olderRecordsSentinelRef = useRef<HTMLDivElement | null>(null)
-  const filterComposingRef = useRef(false)
-  const setCredentialModalOpen = useSetAtom(credentialModalOpenAtom)
-  const syncSnapshot = useSyncExternalStore(
-    subscribeSyncIndicator,
-    getSyncSnapshot,
-    getSyncSnapshot,
-  )
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const sentinelRef = useRef<HTMLDivElement>(null)
+  const queryGeneration = useRef(0)
+  const loadingRef = useRef(false)
+  const composing = useRef(false)
+  const setCredentialModal = useSetAtom(credentialModalOpenAtom)
+  const [records] = useState(() => createRecordWorkflow({ storage, images: imageStore }))
+  const [templates] = useState(() => createTypeTemplateWorkflow({ storage }))
 
-  const uploadImages = useCallback(
-    (files: File[]) => stageImageFiles(storage, files),
-    [],
-  )
-  const [recordWorkflow] = useState(() =>
-    createRecordWorkflow({ storage }),
-  )
-  const [typeTemplateWorkflow] = useState<TypeTemplateWorkflow>(() =>
-    createTypeTemplateWorkflow({ storage }),
-  )
-  const discardStagedImages = useCallback(
-    () => cleanupLocalOrphanImages(storage, Date.now(), 0).then(() => undefined),
-    [],
-  )
-
+  const reload = useCallback(async () => {
+    const generation = ++queryGeneration.current
+    loadingRef.current = true; setLoading(true); setLoadError(undefined)
+    try {
+      const result = await storage.queryRecords({ type: filter })
+      if (generation === queryGeneration.current) setPage(result)
+    } catch (error) {
+      if (generation === queryGeneration.current) setLoadError(cloudErrorMessage(error))
+    } finally {
+      if (generation === queryGeneration.current) { loadingRef.current = false; setLoading(false) }
+    }
+  }, [filter])
+  useEffect(() => { scrollRef.current?.scrollTo(0, 0); void reload() }, [reload])
   useEffect(() => {
     const timer = window.setInterval(() => setReferenceTime(new Date()), 60_000)
     return () => window.clearInterval(timer)
   }, [])
-
-  useEffect(() => {
-    if (recordData.initialStatus !== 'idle') return
-    updateRecordData((current) => {
-      if (current.initialStatus !== 'idle') return current
-      return { ...current, initialStatus: 'loading', initialError: undefined }
-    })
-    void loadInitialRecords(storage, loadReferenceTimeRef.current)
-      .then((result) => {
-        updateRecordData((current) => ({
-          ...current,
-          records: sortRecords(result.records),
-          nextMonth: result.nextMonth,
-          earliestMonth: result.earliestMonth,
-          initialStatus: 'ready',
-          initialError: undefined,
-          olderStatus: 'idle',
-          olderError: undefined,
-        }))
-      })
-      .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error)
-        updateRecordData((current) => ({
-          ...current,
-          initialStatus: 'error',
-          initialError: message,
-        }))
-        toaster.create({ title: '加载记录失败：' + message, type: 'error' })
-      })
-  }, [recordData.initialStatus])
-
-  const filteredRecords = useMemo(
-    () => filterRecordsByType(records, filter),
-    [filter, records],
-  )
-  const groups = useMemo(
-    () => groupRecordsByDay(filteredRecords, referenceTime),
-    [filteredRecords, referenceTime],
-  )
-  const items = useMemo(() => flattenGroups(groups), [groups])
-
+  const items = useMemo(() => {
+    const result: RecordListItem[] = []
+    for (const group of groupRecordsByDay(page.records, referenceTime)) {
+      result.push({ kind: 'day', group })
+      for (const record of group.records) result.push({ kind: 'record', record })
+    }
+    return result
+  }, [page.records, referenceTime])
   const virtualizer = useVirtualizer({
     count: items.length,
-    getItemKey: (index) => {
-      const item = items[index]
-      return item.kind === 'day' ? `day:${item.group.key}` : `record:${item.record.id}`
-    },
+    getItemKey: (index) => { const item = items[index]; return item.kind === 'day' ? 'day:' + item.group.key : item.record.id },
     getScrollElement: () => scrollRef.current,
-    estimateSize: (index) => (items[index]?.kind === 'day' ? 36 : 112),
+    estimateSize: (index) => items[index]?.kind === 'day' ? 36 : 112,
     overscan: 6,
   })
-  // 距顶部的像素位置属于用户，不随记录或测量高度变化自动补偿。
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = () => false
-  const virtualItems = virtualizer.getVirtualItems()
 
-  async function loadOlderMonth() {
-    const currentData = getRecordData()
-    if (!currentData.nextMonth || currentData.olderStatus === 'loading') return
-    const month = currentData.nextMonth
-    updateRecordData((current) => ({
-      ...current,
-      olderStatus: 'loading',
-      olderError: undefined,
-    }))
+  async function loadMore() {
+    if (!page.cursor || loadingRef.current) return
+    const generation = queryGeneration.current
+    loadingRef.current = true; setLoading(true); setLoadError(undefined)
     try {
-      const older = await loadOlderRecords(storage, month)
-      updateRecordData((current) => ({
-        ...current,
-        records: mergeRecords(current.records, older),
-        nextMonth:
-          current.earliestMonth && month !== current.earliestMonth
-            ? previousMonth(month)
-            : undefined,
-        olderStatus: 'ready',
-        olderError: undefined,
-      }))
+      const result = await storage.queryRecords({ type: filter, cursor: page.cursor })
+      if (generation === queryGeneration.current) setPage((current) => ({ records: mergeRecords(current.records, result.records), cursor: result.cursor }))
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      updateRecordData((current) => ({
-        ...current,
-        olderStatus: 'error',
-        olderError: message,
-      }))
-      toaster.create({ title: '加载更早记录失败：' + message, type: 'error' })
+      if (generation === queryGeneration.current) setLoadError(cloudErrorMessage(error))
+    } finally {
+      if (generation === queryGeneration.current) { loadingRef.current = false; setLoading(false) }
     }
   }
-
   useEffect(() => {
-    if (!visible) return
-    const root = scrollRef.current
-    const sentinel = olderRecordsSentinelRef.current
-    if (!root || !sentinel || !nextMonth) return
-
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting && !olderLoading && !olderLoadError) {
-          void loadOlderMonth()
-        }
-      },
-      { root, rootMargin: '240px 0px' },
-    )
-    observer.observe(sentinel)
+    if (!visible || !page.cursor || !scrollRef.current || !sentinelRef.current || loading || loadError) return
+    const observer = new IntersectionObserver(([entry]) => { if (entry.isIntersecting) void loadMore() }, { root: scrollRef.current, rootMargin: '240px 0px' })
+    observer.observe(sentinelRef.current)
     return () => observer.disconnect()
-  }, [visible, items.length, nextMonth, olderLoading, olderLoadError])
+  }, [visible, page.cursor, loading, loadError])
 
-  async function openNewRecord() {
+  async function openNew() {
     if (syncBusy) return
     try {
-      const templates = await typeTemplateWorkflow.list()
-      updateTypeTemplateData((current) => ({
-        ...current,
-        templates,
-        status: 'ready',
-        error: undefined,
-      }))
-      setTemplatePickerOpen(true)
-    } catch (error) {
-      toaster.create({
-        title: '读取类型模板失败：' +
-          (error instanceof Error ? error.message : String(error)),
-        type: 'error',
-      })
-    }
+      const list = await templates.list()
+      updateTypeTemplateData((current) => ({ ...current, templates: list, status: 'ready', error: undefined }))
+      setPickerOpen(true)
+    } catch (error) { toaster.create({ title: '读取模板失败：' + cloudErrorMessage(error), type: 'error' }) }
   }
-
-  async function openExistingRecord(record: LifeRecord) {
+  async function openExisting(record: LifeRecord) {
     if (syncBusy) return
     setEditorLoading(true)
-    setEditorOpen(false)
     try {
-      // 模板在编辑器打开前解析；打开后的输入过程中不再跟随模板热更新。
-      const template = await typeTemplateWorkflow.find(record.type)
-      setEditingRecord(record)
-      setEditorInitialType(record.type)
-      setEditorTemplate(template)
-      setEditorOpen(true)
-    } catch (error) {
-      toaster.create({
-        title: '读取类型模板失败：' +
-          (error instanceof Error ? error.message : String(error)),
-        type: 'error',
-      })
-    } finally {
-      setEditorLoading(false)
-    }
+      setEditorTemplate(await templates.find(record.type)); setEditingRecord(record); setEditorOpen(true)
+    } catch (error) { toaster.create({ title: '读取模板失败：' + cloudErrorMessage(error), type: 'error' }) }
+    finally { setEditorLoading(false) }
   }
-
   function selectTemplate(template: RecordTypeTemplate | undefined) {
-    setTemplatePickerOpen(false)
-    setEditingRecord(undefined)
-    setEditorInitialType(template?.type)
-    setEditorTemplate(template)
-    setEditorOpen(true)
+    setPickerOpen(false); setEditingRecord(undefined); setEditorTemplate(template); setEditorOpen(true)
   }
-
-  async function refreshRecords() {
-    const result = await loadInitialRecords(storage, loadReferenceTimeRef.current)
-    updateRecordData((current) => ({
-      ...current,
-      records: sortRecords(result.records),
-      nextMonth: result.nextMonth,
-      earliestMonth: result.earliestMonth,
-      initialStatus: 'ready',
-      initialError: undefined,
-      olderStatus: 'idle',
-      olderError: undefined,
-    }))
-  }
-
-  async function refreshTypeTemplates() {
-    const templates = await typeTemplateWorkflow.list()
-    updateTypeTemplateData((current) => ({
-      ...current,
-      templates,
-      status: 'ready',
-      error: undefined,
-    }))
-  }
-
-  async function refreshLocalViews() {
-    const results = await Promise.allSettled([refreshRecords(), refreshTypeTemplates()])
-    for (const result of results) {
-      if (result.status === 'rejected') {
-        toaster.create({
-          title: '刷新本地数据失败：' +
-            (result.reason instanceof Error ? result.reason.message : String(result.reason)),
-          type: 'error',
-        })
-      }
-    }
-  }
-
-  async function requestConflictConfirmation(
-    conflictMonths: string[],
-    typeTemplatesConflict: boolean,
-  ): Promise<boolean> {
-    const items: ConflictItem[] = await Promise.all(
-      conflictMonths.map(async (month) => ({
-        month,
-        localRecordCount: (await storage.getRecordsInMonth(month)).length,
-        kind: 'month' as const,
-      })),
-    )
-    if (typeTemplatesConflict) {
-      items.push({
-        month: '类型模板',
-        localRecordCount: 0,
-        kind: 'type-templates',
-      })
-    }
-    return new Promise<boolean>((resolve) => {
-      let settled = false
-      const finish = (confirmed: boolean) => {
-        if (settled) return
-        settled = true
-        setConflictDialog(undefined)
-        resolve(confirmed)
-      }
-      setConflictDialog({ items, resolve: finish })
-    })
-  }
-
-  function reportCleanupError(error: unknown) {
-    if (!error) return
-    toaster.create({
-      title:
-        '本地图片清理失败：' +
-        (error instanceof Error ? error.message : String(error)),
-      type: 'error',
-    })
-  }
-
-  async function handleSaved(saved: LifeRecord, previousTime: Date | undefined) {
-    const result = await recordWorkflow.save(saved, previousTime)
-    updateRecordData((current) => ({
-      ...current,
-      records: mergeRecords(current.records, [saved]),
-    }))
-    reportCleanupError(result.cleanupError)
-    void refreshLocalSyncIndicator().catch(() => {})
+  async function save(record: LifeRecord, drafts: DraftImage[]) {
+    await records.save(record, drafts)
+    queryGeneration.current++; loadingRef.current = false; setLoading(false)
+    setPage((current) => ({ ...current, records: filterRecordsByType(mergeRecords(current.records, [record]), filter) }))
     setEditorOpen(false)
-    setEditingRecord(undefined)
-    setEditorInitialType(undefined)
-    setEditorTemplate(undefined)
     toaster.create({ title: '记录已保存', type: 'success' })
   }
-
-  async function handleDeleted(record: LifeRecord) {
-    const result = await recordWorkflow.delete(record)
-    updateRecordData((current) => ({
-      ...current,
-      records: current.records.filter((item) => item.id !== record.id),
-    }))
-    reportCleanupError(result.cleanupError)
-    void refreshLocalSyncIndicator().catch(() => {})
-    toaster.create({ title: '记录已删除', type: 'success' })
+  async function remove(record: LifeRecord) {
+    await records.delete(record)
+    queryGeneration.current++; loadingRef.current = false; setLoading(false)
+    setPage((current) => ({ ...current, records: current.records.filter((item) => item.id !== record.id) }))
     setEditorOpen(false)
-    setEditingRecord(undefined)
-    setEditorInitialType(undefined)
-    setEditorTemplate(undefined)
+    toaster.create({ title: '记录已删除', type: 'success' })
   }
-
-  async function handleSyncClick() {
-    if (syncBusy || syncChecking || syncSnapshot.connection === 'connecting') return
+  async function synchronize() {
+    if (syncBusy || editorOpen || pickerOpen) return
     const cloud = currentCloud()
-    if (!cloud) {
-      setCredentialModalOpen(true)
-      return
-    }
-    const checkingOnly = syncSnapshot.connection !== 'connected' ||
-      syncSnapshot.checkError !== undefined || syncSnapshot.indicator === 'none'
-    setSyncChecking(checkingOnly)
-    // 只读连接不阻止本地操作；实际快照读写期间不允许并发编辑。
-    if (!checkingOnly) setSyncBusy(true)
+    if (!cloud) { setCredentialModal(true); return }
+    setSyncBusy(true)
+    const display = createSyncProgressDisplay(setProgress)
+    let refresh = false
+    let result: string | undefined
+    let failed = false
     try {
-      // 「已同步」是上一次只读检查的结果；再次点击只刷新这个结果。
-      // 如果检查发现云端或本地有变化，留给用户下一次点击再执行真正同步。
-      if (checkingOnly) {
-        await refreshSharedSyncIndicator()
-        return
-      }
-      // 不让同步前的后台检查在上传完成后回写过时的待上传结果。
-      cancelSyncCheck()
-      const report = await syncCloud(storage, cloud, requestConflictConfirmation)
-      let cleanupError: unknown
-      if (report.outcome === 'downloaded' || report.outcome === 'synced') {
-        try {
-          await cleanupLocalOrphanImages(storage, Date.now(), 0)
-        } catch (error) {
-          // 同步结果已经落库，图片清理失败不应回滚或遮蔽同步结果。
-          cleanupError = error
-        }
-        await refreshLocalViews()
-      }
-      reportCleanupError(cleanupError)
-      const resultTitles = {
-        uploaded: '已更新云端',
-        downloaded: '已更新本地',
-        synced: '已同步云端和本地',
-        'already-latest': '已是最新',
-        aborted: '已取消同步',
-      } as const
-      toaster.create({ title: resultTitles[report.outcome], type: 'success' })
-      if (report.brokenMonths.length > 0) {
-        setBrokenMonths(report.brokenMonths)
-      }
-      if (report.brokenTypeTemplates) {
-        toaster.create({
-          title: '类型模板文件无法读取，本地模板未更新',
-          type: 'error',
-        })
-      }
-      await refreshLocalSyncIndicator()
-      try {
-        await refreshSharedSyncIndicator()
-      } catch (error) {
-        toaster.create({ title: '状态检查失败：' + cloudErrorMessage(error), type: 'error' })
-      }
+      await display.update({ stage: '准备同步', files: 0, totalFiles: 0, bytes: 0, totalBytes: 0 })
+      const outcome = await sync({ storage, cloud, context: syncContext(
+        async () => {
+          await display.finish()
+          return new Promise<boolean>((resolve) => setConflict({ resolve: (answer) => { setConflict(undefined); resolve(answer) } }))
+        },
+        display.update,
+      ) })
+      refresh = outcome === 'downloaded'
+      result = { uploaded: '云端已更新', downloaded: '本地已更新', 'already-latest': '已是最新', aborted: undefined }[outcome]
     } catch (error) {
-      reportSyncFailure(error)
-      toaster.create({
-        title: (checkingOnly ? '' : '同步失败：') + cloudErrorMessage(error),
-        type: 'error',
-      })
-      if (!checkingOnly) {
-        // 下载逐月落库；后续请求失败时也要展示已落库部分，避免编辑旧快照。
-        await refreshLocalViews()
-        await refreshLocalSyncIndicator().catch(() => {})
-      }
+      refresh = true
+      failed = true
+      result = '同步失败：' + cloudErrorMessage(error)
     } finally {
-      if (!checkingOnly) setSyncBusy(false)
-      setSyncChecking(false)
+      try {
+        if (refresh) {
+          await display.update({ stage: '刷新本地数据', files: 0, totalFiles: 0, bytes: 0, totalBytes: 0 })
+          await reload()
+          try {
+            const list = await templates.list()
+            updateTypeTemplateData((current) => ({ ...current, templates: list, status: 'ready', error: undefined }))
+          } catch (error) { toaster.create({ title: '读取模板失败：' + cloudErrorMessage(error), type: 'error' }) }
+        }
+      } finally {
+        await display.finish()
+        // 关闭期间保留最后阶段，直到下一次同步发布初始状态。
+        setSyncBusy(false)
+      }
     }
+    if (result) toaster.create({ title: result, type: failed ? 'error' : 'success' })
   }
-
-  const connecting = syncSnapshot.connection === 'connecting'
-  const syncStatus = syncSnapshot.connection === 'offline'
-    ? { icon: LuRefreshCwOff, label: '已离线' }
-    : connecting
-      ? { icon: LuRefreshCw, label: '连接中' }
-      : syncSnapshot.checkError !== undefined
-        ? { icon: LuRefreshCw, label: '检查失败' }
-        : syncStatusView(syncSnapshot.indicator)
-  const syncLabel = syncBusy && !syncChecking ? '同步中' : syncStatus.label
-
   return (
     <Box flex="1" minH="0" position="relative" display="flex" flexDirection="column">
       <Box p="md" flexShrink={0} bg="bg.muted">
         <Flex align="center" gap="sm">
-          <InputGroup
-            flex="1"
-            startElement={<Icon as={LuSearch} boxSize="4" />}
-          >
-            <Input
-              aria-label="筛选类型"
-              variant="subtle"
-              bg="bg.panel"
-              placeholder="筛选类型"
-              value={filterInput}
-              onChange={(event) => setFilterInput(event.target.value)}
-              onCompositionStart={() => {
-                filterComposingRef.current = true
-              }}
-              onCompositionEnd={() => {
-                filterComposingRef.current = false
-              }}
-              onKeyDown={(event) => {
-                if (
-                  event.key !== 'Enter' ||
-                  event.nativeEvent.isComposing ||
-                  filterComposingRef.current
-                ) {
-                  return
-                }
-                event.preventDefault()
-                setFilter(event.currentTarget.value.trim())
-              }}
-            />
+          <InputGroup flex="1" startElement={<Icon as={LuSearch} boxSize="4" />}>
+            <Input aria-label="筛选类型" variant="subtle" bg="bg.panel" placeholder="筛选类型" value={filterInput}
+              onChange={(event) => setFilterInput(event.target.value)} onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }}
+              onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && !composing.current) { event.preventDefault(); setFilter(filterInput.trim()); event.currentTarget.blur() } }} />
           </InputGroup>
-          <Button
-            variant="subtle"
-            w="24"
-            px="sm"
-            flexShrink={0}
-            color={connecting ? 'fg.muted' : 'fg'}
-            aria-label={syncLabel}
-            aria-busy={syncBusy || syncChecking || connecting}
-            disabled={syncBusy || syncChecking || connecting}
-            onClick={() => void handleSyncClick()}
-          >
-            {syncBusy || syncChecking || connecting ? (
-              <Spinner size="sm" flexShrink={0} />
-            ) : (
-              <Icon as={syncStatus.icon} boxSize="5" />
-            )}
-            <Text textStyle="sm">
-              {syncLabel}
-            </Text>
+          <Button variant="subtle" px="sm" flexShrink={0} disabled={syncBusy} aria-label="手动同步" aria-busy={syncBusy} onClick={() => void synchronize()}>
+            {syncBusy ? <Spinner size="sm" /> : <Icon as={LuRefreshCw} boxSize="5" />}<Text textStyle="sm">{syncBusy ? '同步中' : '同步'}</Text>
           </Button>
         </Flex>
       </Box>
-
-      {initialLoading ? (
-        <Flex flex="1" align="center" justify="center" gap="sm" color="fg.muted">
-          <Spinner size="sm" />
-          <Text textStyle="sm">加载中…</Text>
-        </Flex>
-      ) : loadError ? (
-        <Flex flex="1" align="center" justify="center" px="xl">
-          <Text textStyle="sm" color="fg.error">加载失败，请稍后重试</Text>
-        </Flex>
-      ) : items.length === 0 && !nextMonth ? (
-        <Flex flex="1" align="center" justify="center" px="xl">
-          <Text textStyle="sm" color="fg.muted">
-            {filter ? '没有匹配的记录。' : '暂无记录'}
-          </Text>
-        </Flex>
-      ) : (
-        <Box
-          ref={scrollRef}
-          flex="1"
-          minH="0"
-          overflowY="auto"
-          overflowAnchor="none"
-          overscrollBehaviorY="contain"
-          px="md"
-          role="list"
-        >
-          {items.length === 0 && (
-            <Flex justify="center" px="xl" py="xl">
-              <Text textStyle="sm" color="fg.muted">当前已加载月份没有匹配记录，继续下滑加载更早月份。</Text>
-            </Flex>
-          )}
+      {loading && page.records.length === 0 ? <Flex flex="1" align="center" justify="center" gap="sm"><Spinner size="sm" /><Text>加载中…</Text></Flex>
+        : loadError && page.records.length === 0 ? <Flex flex="1" align="center" justify="center" direction="column" gap="sm"><Text color="fg.error">加载失败：{loadError}</Text><Button onClick={() => void reload()}>重试</Button></Flex>
+        : page.records.length === 0 ? <Flex flex="1" align="center" justify="center"><Text color="fg.muted">{filter ? '没有匹配的记录' : '暂无记录'}</Text></Flex>
+        : <Box ref={scrollRef} flex="1" minH="0" overflowY="auto" overflowAnchor="none" overscrollBehaviorY="contain" px="md" role="list">
           <Box height={virtualizer.getTotalSize()} position="relative" width="full">
-            {virtualItems.map((virtualItem) => {
+            {virtualizer.getVirtualItems().map((virtualItem) => {
               const item = items[virtualItem.index]
-              return (
-                <Box
-                  key={virtualItem.key}
-                  ref={virtualizer.measureElement}
-                  data-index={virtualItem.index}
-                  position="absolute"
-                  top="0"
-                  left="0"
-                  width="full"
-                  pb="sm"
-                  transform={`translateY(${virtualItem.start}px)`}
-                >
-                  {item.kind === 'day' ? (
-                    <RecordDayHeader label={item.group.label} />
-                  ) : (
-                    <RecordCard
-                      record={item.record}
-                      onOpen={openExistingRecord}
-                      imageManager={imageManager}
-                    />
-                  )}
-                </Box>
-              )
+              return <Box key={virtualItem.key} ref={virtualizer.measureElement} data-index={virtualItem.index} position="absolute" top="0" left="0" width="full" pb="sm" transform={`translateY(${virtualItem.start}px)`}>
+                {item.kind === 'day' ? <RecordDayHeader label={item.group.label} /> : <RecordCard record={item.record} onOpen={openExisting} imageStore={imageStore} />}
+              </Box>
             })}
           </Box>
-          <Box ref={olderRecordsSentinelRef} height="1px" aria-hidden="true" />
-          {olderLoadError && (
-            <Flex direction="column" align="center" gap="sm" py="sm">
-              <Text textStyle="sm" color="fg.error">加载更早记录失败</Text>
-              <Button
-                type="button"
-                variant="subtle"
-                onClick={() => void loadOlderMonth()}
-              >
-                重试
-              </Button>
-            </Flex>
-          )}
-          {olderLoading && (
-            <Flex justify="center" align="center" gap="sm" py="sm" color="fg.muted">
-              <Spinner size="sm" />
-              <Text textStyle="sm">加载中…</Text>
-            </Flex>
-          )}
+          <Box ref={sentinelRef} height="1px" aria-hidden="true" />
+          {loading && <Flex justify="center" py="sm"><Spinner size="sm" /></Flex>}
+          {loadError && <Flex direction="column" align="center" gap="sm"><Text color="fg.error">加载失败：{loadError}</Text><Button onClick={() => void loadMore()}>重试</Button></Flex>}
           <Box height="16" />
-        </Box>
-      )}
-
-      <Button
-        position="absolute"
-        right="md"
-        bottom="2xs"
-        zIndex="1"
-        borderRadius="full"
-        boxSize="12"
-        aria-label="新建记录"
-        disabled={editorLoading || syncBusy}
-        onClick={() => void openNewRecord()}
-      >
-        <Icon as={LuPlus} boxSize="6" />
-      </Button>
-
-      <RecordEditor
-        open={editorOpen}
-        record={editingRecord}
-        initialType={editorInitialType}
-        template={editorTemplate}
-        onClose={() => {
-          setEditorOpen(false)
-          setEditingRecord(undefined)
-          setEditorInitialType(undefined)
-          setEditorTemplate(undefined)
-        }}
-        onDiscard={discardStagedImages}
-        onUploadImages={uploadImages}
-        imageManager={imageManager}
-        onSaved={handleSaved}
-        onDeleted={handleDeleted}
-      />
-
-      <TypeTemplatePicker
-        open={templatePickerOpen}
-        templates={typeTemplates}
-        onClose={() => setTemplatePickerOpen(false)}
-        onSelect={selectTemplate}
-      />
-
-      <ConflictDialog state={conflictDialog} />
-      <BrokenMonthsDialog
-        months={brokenMonths}
-        onClose={() => setBrokenMonths(undefined)}
-      />
+        </Box>}
+      <Button position="absolute" right="md" bottom="2xs" zIndex="1" borderRadius="full" boxSize="12" aria-label="新建记录" disabled={editorLoading || syncBusy} onClick={() => void openNew()}><Icon as={LuPlus} boxSize="6" /></Button>
+      <RecordEditor open={editorOpen} record={editingRecord} initialType={editingRecord?.type ?? editorTemplate?.type} template={editorTemplate} onClose={() => setEditorOpen(false)} onPickImages={pickImages} imageStore={imageStore} onSaved={save} onDeleted={remove} />
+      <TypeTemplatePicker open={pickerOpen} templates={typeTemplates} onClose={() => setPickerOpen(false)} onSelect={selectTemplate} />
+      <SyncProgressDialog open={syncBusy && !conflict} progress={progress} />
+      <ConflictDialog state={conflict} />
     </Box>
   )
 }

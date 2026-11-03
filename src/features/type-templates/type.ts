@@ -46,18 +46,8 @@ export type RecordTypeTemplate = {
   type: string
   icon: TypeTemplateIcon
   attributes: TemplateAttribute[]
-}
-
-/** 本地模板集合的同步状态。 */
-export type TypeTemplateState = {
-  remoteRevision: number
-  dirty: boolean
-}
-
-/** 云端 type-templates.json 的内容。 */
-export type TypeTemplatesFile = {
-  revision: number
-  templates: RecordTypeTemplate[]
+  /** 创建时间，单位毫秒；未保存的表单草稿可以省略。 */
+  createdAt?: number
 }
 
 export type TemplateDraftAttribute = {

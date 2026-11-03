@@ -10,15 +10,7 @@ export class CloudRequestError extends Error {
   }
 }
 
-/** 总时限包含签名、连接及响应体读取；超时后底层 fetch 同时取消。 */
-export class CloudTimeoutError extends Error {
-  constructor() {
-    super('连接云端超时，请检查网络后重试')
-    this.name = 'CloudTimeoutError'
-  }
-}
-
-/** 已连接到云端，但清单不能用于同步决策。 */
+/** 已连接到云端，但数据库元信息不能用于同步决策。 */
 export class CloudDataError extends Error {
   constructor(message: string) {
     super(message)
@@ -26,11 +18,10 @@ export class CloudDataError extends Error {
   }
 }
 
-/** 手动云端操作统一使用具体错误提示；后台检查不调用 toast。 */
+/** 云端操作的用户提示。 */
 export function cloudErrorMessage(error: unknown): string {
-  if (error instanceof CloudTimeoutError) return error.message
   if (error instanceof TypeError) {
-    return '连接失败，请检查网络或云端 CORS 配置'
+    return '连接失败，请检查网络和云端端点'
   }
   if (error instanceof CloudRequestError) {
     if (error.code === 'NoSuchBucket') return '云端桶不存在，请在设置中检查端点和桶名'

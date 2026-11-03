@@ -49,9 +49,9 @@ describe('verifyCredential：连接验证分类', () => {
   it('网络失败 / 5xx → no-network，保留明确错误提示', async () => {
     // fetch 网络层失败是 TypeError（不是 CloudRequestError）；5xx 是云端故障。
     // 两者都不是凭证错误，但首次配置时不能把它误判成成功绕过弹窗；
-    // 网络层失败使用明确、简短的提示，引导检查网络或云端 CORS 配置。
+    // 网络层失败使用明确、简短的提示，引导检查网络和云端端点。
     await expect(verifyCredential(fakeCloud(async () => { throw new TypeError("fetch failed") })))
-      .resolves.toMatchObject({ ok: false, kind: "no-network", message: "连接失败，请检查网络或云端 CORS 配置" })
+      .resolves.toMatchObject({ ok: false, kind: "no-network", message: "连接失败，请检查网络和云端端点" })
     await expect(verifyCredential(fakeCloud(async () => { throw new CloudRequestError("5xx", 500) })))
       .resolves.toMatchObject({ ok: false, kind: "no-network", message: expect.any(String) })
   })

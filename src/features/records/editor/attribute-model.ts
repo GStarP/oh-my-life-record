@@ -79,7 +79,7 @@ function rowFromValue(
  * 将记录属性变成表单行。
  *
  * 已有属性保持原对象顺序；模板新增的属性追加在末尾。模板删除或
- * 重命名的旧属性不会被删除，会按原始值类型作为普通属性继续显示。
+ * 未包含在模板中的记录属性，按其值类型作为普通属性显示。
  */
 export function attributesToRows(
   attributes: Record<string, StoredAttributeValue>,

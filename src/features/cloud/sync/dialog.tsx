@@ -1,9 +1,25 @@
-/** 同步冲突与损坏分片的移动端确认弹窗。 */
-import { Button, Dialog, Flex, Text } from '@chakra-ui/react'
-import type {
-  BrokenMonthsDialogProps,
-  ConflictDialogProps,
-} from './dialog.type'
+import { Button, Dialog, Flex, Portal, Spinner, Text } from '@chakra-ui/react'
+import type { ConflictDialogProps, SyncProgressDialogProps } from './dialog.type'
+
+export function SyncProgressDialog({ open, progress }: SyncProgressDialogProps) {
+  const status = (progress?.stage ?? '准备同步') + (progress?.totalFiles ? `（${progress.files}/${progress.totalFiles}）` : '')
+  return (
+    <Dialog.Root open={open} closeOnEscape={false} closeOnInteractOutside={false} motionPreset="none">
+      <Portal>
+        <Dialog.Backdrop />
+        <Dialog.Positioner inset="0" alignItems="center" justifyContent="center" p="md">
+          <Dialog.Content width="full" maxW="sm" bg="bg.panel" textAlign="center" p="lg">
+            <Flex direction="column" align="center" gap="md" width="full">
+              <Dialog.Title textStyle="md">正在同步</Dialog.Title>
+              <Spinner size="lg" aria-hidden="true" />
+              <Dialog.Description role="status" aria-live="polite" aria-atomic="true" textStyle="md" color="fg" h="6" width="full" whiteSpace="nowrap" overflow="hidden" textOverflow="ellipsis" fontVariantNumeric="tabular-nums">{status}</Dialog.Description>
+            </Flex>
+          </Dialog.Content>
+        </Dialog.Positioner>
+      </Portal>
+    </Dialog.Root>
+  )
+}
 
 export function ConflictDialog({ state }: ConflictDialogProps) {
   return (
@@ -20,27 +36,7 @@ export function ConflictDialog({ state }: ConflictDialogProps) {
             <Dialog.Title textStyle="md">发现云端冲突</Dialog.Title>
           </Dialog.Header>
           <Dialog.Body>
-            <Flex direction="column" gap="md">
-              <Text textStyle="sm">
-                确认后，以下月份会用云端数据覆盖本地未同步修改；取消则本次同步完全不执行。
-              </Text>
-              <Flex direction="column" gap="xs">
-                {state?.items.map((item) => (
-                  <Flex key={item.month} justify="space-between" gap="md">
-                    <Text textStyle="sm">{item.month}</Text>
-                    {item.kind === 'type-templates' ? (
-                      <Text textStyle="sm" color="fg.muted">
-                        将覆盖本地类型模板
-                      </Text>
-                    ) : (
-                      <Text textStyle="sm" color="fg.muted">
-                        将覆盖 {item.localRecordCount} 条本地记录
-                      </Text>
-                    )}
-                  </Flex>
-                ))}
-              </Flex>
-            </Flex>
+            <Text textStyle="sm">本地和云端都有修改。继续后，云端的全部记录、类型模板和图片会覆盖本地内容，本地未备份的修改会丢失。</Text>
           </Dialog.Body>
           <Dialog.Footer>
             <Flex width="full" gap="sm">
@@ -60,44 +56,6 @@ export function ConflictDialog({ state }: ConflictDialogProps) {
                 覆盖并同步
               </Button>
             </Flex>
-          </Dialog.Footer>
-        </Dialog.Content>
-      </Dialog.Positioner>
-    </Dialog.Root>
-  )
-}
-
-export function BrokenMonthsDialog({
-  months,
-  onClose,
-}: BrokenMonthsDialogProps) {
-  return (
-    <Dialog.Root
-      open={months !== undefined && months.length > 0}
-      onOpenChange={(event) => {
-        if (!event.open) onClose()
-      }}
-    >
-      <Dialog.Backdrop />
-      <Dialog.Positioner alignItems="center" justifyContent="center">
-        <Dialog.Content width="calc(100% - 2rem)" maxW="sm" bg="bg.panel">
-          <Dialog.Header>
-            <Dialog.Title textStyle="md">部分月份未更新</Dialog.Title>
-          </Dialog.Header>
-          <Dialog.Body>
-            <Flex direction="column" gap="sm">
-              <Text textStyle="sm">
-                以下云端分片无法读取，本次同步已跳过这些月份：
-              </Text>
-              <Text textStyle="sm" color="fg.muted">
-                {months?.join('、')}
-              </Text>
-            </Flex>
-          </Dialog.Body>
-          <Dialog.Footer>
-            <Button width="full" variant="plain" onClick={onClose}>
-              知道了
-            </Button>
           </Dialog.Footer>
         </Dialog.Content>
       </Dialog.Positioner>

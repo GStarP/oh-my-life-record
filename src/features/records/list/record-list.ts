@@ -1,9 +1,4 @@
-/**
- * 记录列表的数据纯函数。
- *
- * 不依赖 React；页面只负责加载月份和渲染结果，日历边界统一由此处按 UTC+8
- * 处理，避免设备时区影响「今天/昨天」标签。
- */
+/** 记录列表的固定 UTC+8 日分组及类型匹配规则。 */
 import { differenceInCalendarDays } from 'date-fns'
 import { formatInTimeZone } from 'date-fns-tz'
 import type { LifeRecord } from '../type'
@@ -21,15 +16,15 @@ function labelForDay(dayKey: string, referenceDay: string): string {
     : formatInTimeZone(wallDate(dayKey), 'UTC', 'yyyy年M月d日')
 }
 
-/** 仅匹配完整类型；空查询返回原数组，交给调用方保留当前列表顺序。 */
+/** 保存后合并当前页时保留类型筛选，避免不匹配的新记录进入列表。 */
 export function filterRecordsByType(
   records: LifeRecord[],
   query: string,
 ): LifeRecord[] {
-  const normalizedQuery = query.trim().toLocaleLowerCase()
+  const normalizedQuery = query.trim().toLowerCase()
   if (!normalizedQuery) return records
   return records.filter(
-    (record) => record.type.trim().toLocaleLowerCase() === normalizedQuery,
+    (record) => record.type.trim().toLowerCase() === normalizedQuery,
   )
 }
 

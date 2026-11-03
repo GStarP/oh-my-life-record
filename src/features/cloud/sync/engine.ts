@@ -1,294 +1,135 @@
-/**
- * 云端同步规则：通过注入的本地存储和云端接口执行，不依赖浏览器或 React。
- * 规则来源：docs/设计文档.md §5、ADR-0002。
- */
-import { SCHEMA_VERSION } from '../r2/schema'
-import type {
-  Manifest,
-  PartitionFile,
-  PartitionState,
-} from './engine.type'
-import type { StorageAdapter } from '../../storage/type'
-import type { CloudAdapter } from '../cloud.type'
-import type {
-  ConfirmConflict,
-  PendingImage,
-  SyncClassification,
-  SyncIndicator,
-  SyncReport,
-  SyncKind,
-} from './engine.type'
+import type { ImageFile } from '../../storage/type'
+import type { BackupState, SyncDependencies, SyncOutcome, TransferFile } from './engine.type'
 
-/** 云端从未初始化时视为空 manifest。 */
-const EMPTY_MANIFEST: Manifest = {
-  schemaVersion: SCHEMA_VERSION,
-  partitions: {},
-  typeTemplatesRevision: 0,
-}
+const RESERVE_BYTES = 16 * 1024 * 1024
 
-/** 分片与模板共用版本判定；云端低于本地已确认值时保持不读写。 */
-function classifyRevision(
-  localRevision: number,
-  dirty: boolean,
-  cloudRevision: number | undefined,
-): SyncKind {
-  if (cloudRevision !== undefined) {
-    if (cloudRevision > localRevision) {
-      return dirty ? 'conflict' : 'download'
-    }
-    if (cloudRevision === localRevision) {
-      return dirty ? 'upload' : 'none'
-    }
-    return 'none'
+/** 先补图片、再提交快照、最后传播删除；未确认结果留待下次核对。 */
+export async function sync({ storage, cloud, context }: SyncDependencies): Promise<SyncOutcome> {
+  const id = crypto.randomUUID()
+  let started = false
+  let detach: (() => Promise<void>) | undefined
+  let state: BackupState = await context.loadState(cloud.namespace)
+  const show = (stage: string) => context.progress({ stage, files: 0, totalFiles: 0, bytes: 0, totalBytes: 0 })
+  async function transfer<T extends TransferFile>(images: T[], stage: string, action: (image: T) => Promise<void>) {
+    if (images.length === 0) return
+    let failed: unknown
+    let next = 0, completed = 0, completedBytes = 0
+    const bytes = new Map<string, number>()
+    const done = new Set<string>()
+    const totalBytes = images.reduce((sum, image) => sum + image.bytes, 0)
+    const report = () => context.progress({ stage, files: completed, totalFiles: images.length, bytes: completedBytes + [...bytes.values()].reduce((sum, value) => sum + value, 0), totalBytes })
+    detach = await context.observe(id, (key, value) => { if (!done.has(key)) { bytes.set(key, value); report() } })
+    await report()
+    try {
+      await Promise.all(Array.from({ length: Math.min(2, images.length) }, async () => {
+        while (next < images.length && !failed) {
+          const image = images[next++]
+          try { await action(image) } catch (error) { failed = error; return }
+          done.add(image.path); bytes.delete(image.path); completed++; completedBytes += image.bytes; await report()
+        }
+      }))
+      if (failed) throw failed
+    } finally { await detach(); detach = undefined }
   }
-  return dirty ? 'upload' : 'none'
-}
-
-/** 对「云端 ∪ 本地」所有月份分类，按月份升序返回。 */
-function classifyAll(
-  manifest: Manifest,
-  states: PartitionState[],
-): SyncClassification[] {
-  const months = new Set<string>(Object.keys(manifest.partitions))
-  const stateByMonth = new Map(states.map((s) => [s.month, s]))
-  for (const s of states) months.add(s.month)
-
-  return [...months]
-    .sort()
-    .map((month) => {
-      const local = stateByMonth.get(month)
-      return {
-        month,
-        kind: classifyRevision(
-          local?.remoteRevision ?? 0,
-          local?.dirty ?? false,
-          manifest.partitions[month],
-        ),
+  async function verifyImages(images: ImageFile[]) {
+    const actual = await cloud.listImages(id)
+    const expected = new Map(images.map((image) => [image.path, image.bytes]))
+    if (actual.length !== expected.size || actual.some((image) => expected.get(image.path) !== image.bytes)) throw new Error('云端图片集合尚未对齐，请重新同步')
+  }
+  try {
+    await show('检查云端')
+    const remote = await cloud.getSnapshot()
+    const objects = await cloud.listImages()
+    let local = await storage.inspect()
+    if (state.pending && remote?.sha256 === state.pending.sha256 && remote.revision === state.pending.revision) {
+      state = { revision: remote.revision, sequence: state.pending.sequence, sha256: remote.sha256 }
+      await context.saveState(cloud.namespace, state)
+    }
+    if ((!remote && state.revision > 0) || (remote && remote.revision < state.revision)) throw new Error('云端版本异常，本地数据保持不变')
+    if (remote && remote.revision === state.revision && remote.sha256 !== state.sha256) throw new Error('云端版本与内容不一致，本地数据保持不变')
+    if (!remote && local.recordCount === 0 && local.images.length === 0 && local.sequence === 0 && objects.length > 0) throw new Error('云端尚无完整数据库，请先完成完整备份后再试')
+    const dirty = local.sequence !== state.sequence
+    const checkedSequence = local.sequence
+    const download = remote !== undefined && remote.revision > state.revision
+    if (download && dirty && !await context.confirmConflict()) return 'aborted'
+    await context.begin(id); started = true
+    local = await storage.inspect()
+    if (local.sequence !== checkedSequence) throw new Error('检查期间本地发生修改，请重新同步')
+    if (download && remote) {
+      await context.prepare(id, remote.sha256)
+      await show('获取数据库快照')
+      const folder = 'transfers/' + remote.sha256
+      const path = folder + '/database.sqlite'
+      const existing = await context.info(path)
+      if (existing?.bytes !== remote.bytes) {
+        if (await context.freeSpace() < remote.bytes + RESERVE_BYTES) throw new Error('存储空间不足，无法恢复数据库')
+        await cloud.download('database.sqlite', path, remote.sha256, id, remote.etag)
       }
-    })
-}
-
-/**
- * 由月份分类推导指示器（docs/设计文档.md §5.5）。
- * 两个独立维度：有下载/冲突月 → 亮 ↓；有上传月 → 亮 ↑；可同时成立。
- */
-function deriveIndicator(
-  classes: SyncClassification[],
-  typeTemplatesKind: SyncKind = 'none',
-): SyncIndicator {
-  const hasDownload = classes.some(
-    (c) => c.kind === 'download' || c.kind === 'conflict',
-  ) || typeTemplatesKind === 'download' || typeTemplatesKind === 'conflict'
-  const hasUpload = classes.some((c) => c.kind === 'upload') || typeTemplatesKind === 'upload'
-  if (hasDownload && hasUpload) return 'both'
-  if (hasDownload) return 'download'
-  if (hasUpload) return 'upload'
-  return 'none'
-}
-
-/**
- * 只读检查：启动/回前台时推导同步按钮指示器。
- * 只对比版本，不下载、不上传、不修改任何本地或云端数据。
- */
-export async function checkForUpdates(
-  storage: StorageAdapter,
-  cloud: CloudAdapter,
-): Promise<SyncIndicator> {
-  const manifest = (await cloud.getManifest()) ?? EMPTY_MANIFEST
-  const states = await storage.getAllPartitionStates()
-  const templateState = await storage.getTypeTemplateState()
-  const templateKind = classifyRevision(
-    templateState?.remoteRevision ?? 0,
-    templateState?.dirty ?? false,
-    manifest.typeTemplatesRevision,
-  )
-  return deriveIndicator(classifyAll(manifest, states), templateKind)
-}
-
-/**
- * 记录与模板快照的全局同步入口（docs/设计文档.md §5.2）。
- * 冲突取消时整体中止；确认后先下载再上传。损坏文件保留本地数据并在
- * 返回值中报告，其余请求或写入错误向调用方传播。
- */
-export async function sync(
-  storage: StorageAdapter,
-  cloud: CloudAdapter,
-  confirmConflict: ConfirmConflict,
-): Promise<SyncReport> {
-  const manifest = (await cloud.getManifest()) ?? EMPTY_MANIFEST
-  if (manifest.schemaVersion !== SCHEMA_VERSION) {
-    throw new Error(`不支持的 schemaVersion：${manifest.schemaVersion}`)
-  }
-
-  const classes = classifyAll(manifest, await storage.getAllPartitionStates())
-  const templateState = await storage.getTypeTemplateState()
-  const templateKind = classifyRevision(
-    templateState?.remoteRevision ?? 0,
-    templateState?.dirty ?? false,
-    manifest.typeTemplatesRevision,
-  )
-  const conflicts = classes.filter((c) => c.kind === 'conflict')
-  const downloads = classes.filter((c) => c.kind === 'download')
-  const uploads = classes.filter((c) => c.kind === 'upload')
-  const templateConflict = templateKind === 'conflict'
-  const templateDownload = templateConflict || templateKind === 'download'
-  const templateUpload = templateKind === 'upload'
-
-  // 冲突一票否决（ADR-0002）：取消则整体中止、零变更。
-  if (conflicts.length > 0 || templateConflict) {
-    const confirmed = await confirmConflict(
-      conflicts.map((c) => c.month),
-      templateConflict,
-    )
-    if (!confirmed) return { outcome: 'aborted', brokenMonths: [] }
-    // 确认后冲突月转为下载（云端覆盖本地）。
-    downloads.push(...conflicts)
-  }
-
-  // 同一次同步允许不同月份分别下载或上传；先下载，再上传。
-  const { brokenMonths, brokenTypeTemplates, didDownload } = await downloadPhase(
-    storage,
-    cloud,
-    downloads,
-    templateDownload,
-    manifest,
-  )
-  let didUpload = false
-  if (uploads.length > 0 || templateUpload) {
-    await uploadPhase(storage, cloud, uploads, templateUpload, manifest)
-    didUpload = true
-  }
-
-  const outcome: SyncReport['outcome'] =
-    didUpload && didDownload
-      ? 'synced'
-      : didUpload
-        ? 'uploaded'
-        : didDownload
-          ? 'downloaded'
-          : 'already-latest'
-  return {
-    outcome,
-    brokenMonths,
-    ...(brokenTypeTemplates ? { brokenTypeTemplates: true } : {}),
-  }
-}
-
-/** 下载阶段：逐月下载记录与全局模板；文件缺失收集进 broken 状态。 */
-async function downloadPhase(
-  storage: StorageAdapter,
-  cloud: CloudAdapter,
-  downloads: SyncClassification[],
-  templateDownload: boolean,
-  manifest: Manifest,
-): Promise<{
-  brokenMonths: string[]
-  brokenTypeTemplates: boolean
-  didDownload: boolean
-}> {
-  const brokenMonths: string[] = []
-  let brokenTypeTemplates = false
-  let didDownload = false
-  for (const d of downloads) {
-    const file = await cloud.getPartitionFile(d.month)
-    // manifest 是本次同步的版本快照；文件 revision 不一致时不能把
-    // 一个未被 manifest 提交的快照写入本地，否则下一次检查可能把本地
-    // 错误地视为“领先”或反复覆盖。
-    if (!file || file.revision !== manifest.partitions[d.month]) {
-      brokenMonths.push(d.month)
-      continue
+      const target = await storage.inspect(path)
+      const cloudImages = new Map(objects.map((image) => [image.path, image.bytes]))
+      if (target.images.some((image) => cloudImages.get(image.path) !== image.bytes)) throw new Error('云端数据库引用的图片缺失或大小不一致，本地数据保持不变')
+      const localByPath = new Map(local.images.map((image) => [image.path, image]))
+      const missing: ImageFile[] = []
+      for (const image of target.images) {
+        const current = localByPath.get(image.path)
+        if (current && current.sha256 !== image.sha256) throw new Error('相同图片标识的内容发生变化')
+        const onDisk = await context.info(image.path)
+        if (current?.sha256 === image.sha256 && onDisk?.bytes === image.bytes) continue
+        if (!current && onDisk?.bytes === image.bytes && (await context.info(image.path, true))?.sha256 === image.sha256) continue
+        if ((await context.info(folder + '/' + image.path))?.bytes !== image.bytes) missing.push(image)
+      }
+      if (await context.freeSpace() < missing.reduce((sum, image) => sum + image.bytes, 0) + RESERVE_BYTES) throw new Error('存储空间不足，现有数据保持不变')
+      await transfer(missing, '恢复图片', async (image) => { await cloud.download(image.path, folder + '/' + image.path, image.sha256, id) })
+      await show('校验并安装数据')
+      if ((await cloud.getSnapshot(id))?.etag !== remote.etag) throw new Error('恢复期间云端发生变化，请重试')
+      state = { revision: remote.revision, sequence: target.sequence, sha256: remote.sha256 }
+      await context.activate(id, path, target.images.map((image) => image.path), cloud.namespace, state)
+      const expected = new Set(target.images.map((image) => image.path))
+      await show('对齐图片集合')
+      await transfer(objects.filter((image) => !expected.has(image.path)), '删除多余云端图片', (image) => cloud.deleteImage(image.path, id))
+      await verifyImages(target.images)
+      return 'downloaded'
     }
-    await storage.replacePartition(file)
-    didDownload = true
-  }
-  if (templateDownload) {
-    const file = await cloud.getTypeTemplatesFile()
-    if (!file || file.revision !== manifest.typeTemplatesRevision) {
-      brokenTypeTemplates = true
-    } else {
-      await storage.replaceTypeTemplates(file.templates, file.revision)
-      didDownload = true
+    await context.prepare(id, id)
+    const remoteByPath = new Map(objects.map((image) => [image.path, image.bytes]))
+    const uploads: ImageFile[] = []
+    await show('检查本地图片')
+    let checked = 0
+    for (const image of local.images) {
+      if (!/^images\/[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(image.path) || !/^[a-f0-9]{64}$/.test(image.sha256)) throw new Error('本地图片元信息不正确')
+      const onDisk = await context.info(image.path)
+      if (onDisk?.bytes !== image.bytes) {
+        if (remote && remoteByPath.get(image.path) === image.bytes) {
+          const repaired = await cloud.download(image.path, 'transfers/' + id + '/' + image.path, image.sha256, id)
+          await context.adoptImage(id, repaired.path, image.path)
+        } else {
+          throw new Error('本地图片缺失或损坏，云端没有可恢复副本')
+        }
+      }
+      if (remoteByPath.get(image.path) !== image.bytes) uploads.push(image)
+      checked++
+      if (checked % 25 === 0 || checked === local.images.length) await context.progress({ stage: '检查本地图片', files: checked, totalFiles: local.images.length, bytes: 0, totalBytes: 0 })
     }
-  }
-  return { brokenMonths, brokenTypeTemplates, didDownload }
-}
-
-/**
- * 上传阶段：传图 → 写记录/模板文件 → PUT manifest（提交点）→ 复位本地状态。
- * 类型模板是独立的全局文件，但与记录分片共用 manifest 提交点。
- */
-async function uploadPhase(
-  storage: StorageAdapter,
-  cloud: CloudAdapter,
-  uploads: SyncClassification[],
-  templateUpload: boolean,
-  manifest: Manifest,
-): Promise<void> {
-  // 1. 读取各上传月的记录，并收集被引用的图片 ID（去重）。
-  const recordsByMonth = new Map<string, PartitionFile['records']>()
-  const referencedImageIds = new Set<string>()
-  for (const u of uploads) {
-    const records = await storage.getRecordsInMonth(u.month)
-    recordsByMonth.set(u.month, records)
-    for (const r of records) for (const img of r.images) referencedImageIds.add(img)
-  }
-
-  // 2. 计算待上传图片：仅「被本地记录引用 且 本地暂存存在（即尚未上传）」。
-  //    存在即未上传（ADR-0005：上传成功后删除本地暂存），孤儿（有暂存无引用）
-  //    不上传——从源头预防云端孤儿。
-  const pendingImages: PendingImage[] = []
-  for (const id of referencedImageIds) {
-    const blob = await storage.getImageBlob(id)
-    if (blob) pendingImages.push({ id, blob })
-  }
-
-  // 3. 传图；成功后删除本地暂存（putImage 幂等，可安全重试）。
-  for (const img of pendingImages) {
-    await cloud.putImage(img.id, img.blob)
-    await storage.deleteImageBlob(img.id)
-  }
-
-  // 4. 写各 dirty 月 JSON（分片版本 = 云端旧值 + 1）。
-  const newPartitions = { ...manifest.partitions }
-  for (const u of uploads) {
-    const newRevision = (manifest.partitions[u.month] ?? 0) + 1
-    await cloud.putPartitionFile({
-      month: u.month,
-      revision: newRevision,
-      records: recordsByMonth.get(u.month) ?? [],
-    })
-    newPartitions[u.month] = newRevision
-  }
-
-  let newTypeTemplatesRevision = manifest.typeTemplatesRevision
-  if (templateUpload) {
-    newTypeTemplatesRevision = manifest.typeTemplatesRevision + 1
-    await cloud.putTypeTemplatesFile({
-      revision: newTypeTemplatesRevision,
-      templates: await storage.getTypeTemplates(),
-    })
-  }
-
-  // 5. PUT manifest（提交点）：此步失败则异常向上传播，本地 dirty 不复位，
-  //    下次 sync 重读旧 manifest 后幂等重写月份文件与 manifest，自愈。
-  await cloud.putManifest({
-    schemaVersion: SCHEMA_VERSION,
-    partitions: newPartitions,
-    typeTemplatesRevision: newTypeTemplatesRevision,
-  })
-
-  // 6. 复位本地同步状态。
-  for (const u of uploads) {
-    await storage.putPartitionState({
-      month: u.month,
-      remoteRevision: newPartitions[u.month],
-      dirty: false,
-    })
-  }
-  if (templateUpload) {
-    await storage.putTypeTemplateState({
-      remoteRevision: newTypeTemplatesRevision,
-      dirty: false,
-    })
+    await transfer(uploads, '上传图片', (image) => cloud.uploadImage(image.path, image.mime, id))
+    let uploaded = false
+    if (dirty || (!remote && (local.recordCount > 0 || (await storage.getTypeTemplates()).length > 0))) {
+      await show('提交数据库快照')
+      const file = await context.snapshot(id)
+      const revision = (remote?.revision ?? 0) + 1
+      await context.saveState(cloud.namespace, { ...state, pending: { revision, sequence: local.sequence, sha256: file.sha256 } })
+      await cloud.uploadSnapshot(file, revision, remote?.etag, id)
+      state = { revision, sequence: local.sequence, sha256: file.sha256 }
+      await context.saveState(cloud.namespace, state)
+      uploaded = true
+    }
+    await show('对齐图片集合')
+    const expected = new Set(local.images.map((image) => image.path))
+    await transfer(objects.filter((image) => !expected.has(image.path)), '删除多余云端图片', (image) => cloud.deleteImage(image.path, id))
+    await context.align(id, [...expected])
+    await verifyImages(local.images)
+    return uploaded ? 'uploaded' : 'already-latest'
+  } finally {
+    if (detach) await detach().catch(() => {})
+    if (started) await context.end(id)
   }
 }

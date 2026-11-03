@@ -1,48 +1,47 @@
-# Oh My Life
+# OhMyLife
 
-单用户、移动优先的生活记录 PWA，支持无凭证和离线记录。IndexedDB 保存本地业务数据，Cloudflare R2 保存云端快照和图片；同步由用户主动触发。
+仅供个人使用的 Android 生活记录应用。React 界面运行在 Capacitor 壳内，SQLite 和图片文件保存在手机本地；无需云端配置即可离线使用，S3/R2 用于手动备份与恢复。
 
-## 快速开始
+## 开始开发
 
-```bash
+需要 Node.js 24、pnpm、JDK 21 和 Android SDK 36。
+
+```sh
 pnpm install
-pnpm dev
+pnpm android:sync
+pnpm android:open
 ```
 
-## 部署
+在 Android Studio 中运行模拟器或手机。数据功能通过 Android 原生插件提供。构建、签名和手机安装见 [Android 说明](android/README.md)。
 
-项目通过 Cloudflare Workers Static Assets 托管。构建后必须使用仓库中的
-`wrangler.jsonc` 部署，确保 `/records`、`/settings` 等前端路由直接访问或刷新时
-回退到 `index.html`：
+## 验证与打包
 
-```bash
-pnpm build
-pnpm dlx wrangler deploy
+```sh
+pnpm test
+pnpm android:package
 ```
 
-## 开发验证
-
-提交前按[开发验证](docs/开发验证.md)运行本地回归、生产构建与 PWA 真实浏览器回归。该文档也包含 Cloudflare 静态资源验证、手机检查和真实 R2 冒烟的运行方式。
+打包只生成带版本号的本地候选产物。运行 `pnpm release:review` 打开审核页；确认后自动发布，取消则退出。每个版本发布前均须用户明确批准，见 [AGENTS.md](AGENTS.md) 和 [发布流程](docs/发布.md)。
 
 ## 文档入口
 
-新开发者按以下顺序阅读：
+- [领域术语](CONTEXT.md)：记录、模板、图片和备份的含义。
+- [产品与架构](docs/设计文档.md)：模块职责、编辑和同步流程。
+- [云端格式](docs/cloud-storage-format.md)：SQLite 快照、图片对象和提交元信息。
+- [开发验证](docs/开发验证.md)：核心回归、独立模拟器和真机检查。
+- [验收记录](docs/验收记录.md)：验证结果与实际手机体验范围。
+- [架构决策](docs/adr/)：长期保留的取舍。
 
-1. [仓库协作规则](AGENTS.md)
-2. [领域术语与不变规则](CONTEXT.md)
-3. [当前产品与运行架构](docs/设计文档.md)
-4. [架构决策](docs/adr/)
-5. [S3/R2 存储格式](docs/cloud-storage-format.md)
-6. [开发验证](docs/开发验证.md)
+## 代码位置
 
-早期讨论、已完成票据和一次性交付记录不保留在仓库中；临时文件按[票据规则](docs/agents/issue-tracker.md)处理。
+| 位置 | 职责 |
+| --- | --- |
+| `src/app/` | 应用壳、路由与生命周期组装 |
+| `src/features/` | 记录、类型模板、存储、云端、偏好与通知 |
+| `src/design-system/` | Chakra 主题与通用界面组合 |
+| `src/utils/` | 无业务语义的时间和时限工具 |
+| `android/` | Android 工程、原生数据与图片能力 |
+| `tools/` | Android 打包与逐版本审核发布工具 |
+| `tests/` | 核心规则、真实 SQLite 与 Android 回归 |
 
-## 代码结构
-
-- `src/app/`：应用壳、路由、页面和应用生命周期单例。
-- `src/design-system/`：Chakra 主题与通用 UI 组合。
-- `src/features/`：全部业务代码，按记录、类型模板、云端、本地存储、偏好和通知聚合；接口与具体实现放在所属业务能力内。
-- `src/utils/`：不含业务语义的通用工具，目前只有固定 UTC+8 的时间换算。
-- `tests/`：外部行为和核心纯函数测试。
-
-S3/R2 桶内不上传 README 或其他说明文件，桶内格式只由项目内的 [存储格式文档](docs/cloud-storage-format.md) 解释。
+凭证、签名私钥、个人数据备份及构建产物均不提交到仓库。

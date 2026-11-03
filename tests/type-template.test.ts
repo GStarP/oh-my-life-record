@@ -1,9 +1,9 @@
 /** 类型模板与记录表单属性模型的核心规则测试。 */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { attributesToRows, rowsToAttributes } from '../src/features/records/editor/attribute-model'
 import { normalizeTemplate, validateTemplate } from '../src/features/type-templates/model'
 import { createTypeTemplateWorkflow } from '../src/features/type-templates/workflow'
-import { InMemoryStorage } from './helpers/inmemory.storage'
+import { createTestStorage } from './helpers/sqlite'
 
 describe('类型模板校验', () => {
   it('同一模板内重复选项会阻止保存，空选项列表仍然合法', () => {
@@ -107,10 +107,37 @@ describe('模板表单属性合并与存储收敛', () => {
 })
 
 describe('类型模板操作层', () => {
+  it('按创建时间升序展示，编辑与数据库整理不改变顺序，删除后重建排到末尾', async () => {
+    // 使用真实 SQLite 和与名称顺序相反的创建顺序，验证列表不依赖系统语言。
+    // 编辑只改变图标和属性，必须保留首次创建时间；VACUUM 代表快照整理，不能改变顺序。
+    // 删除后重建属于新模板，应记录新的时间并追加到最后，不能复用已删除模板的时间。
+    const { storage, database } = createTestStorage()
+    const workflow = createTypeTemplateWorkflow({ storage })
+    const clock = vi.spyOn(Date, 'now')
+    try {
+      clock.mockReturnValue(1000)
+      await workflow.save({ type: 'Z', icon: 'library', attributes: [] })
+      clock.mockReturnValue(2000)
+      await workflow.save({ type: 'A', icon: 'wallet', attributes: [] })
+      expect((await workflow.list()).map((item) => [item.type, item.createdAt])).toEqual([['Z', 1000], ['A', 2000]])
+
+      clock.mockReturnValue(3000)
+      await workflow.save({ type: 'Z', icon: 'book-open', attributes: [{ name: '作者', kind: 'text' }] }, 'Z')
+      database.exec('VACUUM')
+      expect((await workflow.list()).map((item) => [item.type, item.createdAt])).toEqual([['Z', 1000], ['A', 2000]])
+      expect((await workflow.find('Z'))?.icon).toBe('book-open')
+
+      await workflow.remove('Z')
+      clock.mockReturnValue(4000)
+      await workflow.save({ type: 'Z', icon: 'library', attributes: [] })
+      expect((await workflow.list()).map((item) => [item.type, item.createdAt])).toEqual([['A', 2000], ['Z', 4000]])
+    } finally { clock.mockRestore(); database.close() }
+  })
+
   it('保存层再次保证类型唯一且禁止编辑时改类型', async () => {
     // UI 的只读输入不是完整保护：未来可能还有导入、脚本或其他调用方。
-    // 非 React workflow 必须在真正写入 IndexedDB 前再次守住类型身份规则。
-    const workflow = createTypeTemplateWorkflow({ storage: new InMemoryStorage() })
+    // 非 React workflow 必须在真正写入 SQLite 前再次守住类型身份规则。
+    const workflow = createTypeTemplateWorkflow({ storage: createTestStorage().storage })
     await workflow.save({ type: '记账', icon: 'library', attributes: [] })
 
     await expect(

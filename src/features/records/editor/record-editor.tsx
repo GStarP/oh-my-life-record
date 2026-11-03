@@ -1,16 +1,9 @@
-/**
- * 记录编辑 bottom sheet。
- *
- * 记录字段交给 react-hook-form；属性编辑器保留一个轻量行模型，保存时再收敛
- * 回 LifeRecord.attributes。图片暂存由页面注入，图片展示由 ImageManager 统一管理。
- */
 import {
   useEffect,
   useId,
   useMemo,
   useRef,
   useState,
-  type ChangeEvent,
 } from "react";
 import { useForm } from "react-hook-form";
 import {
@@ -29,10 +22,11 @@ import {
 } from "@chakra-ui/react";
 import { LuTrash2, LuX } from "react-icons/lu";
 import { ulid } from "ulidx";
+import { releaseImages } from '../images/image-import'
+import type { DraftImage } from '../images/image-import.type'
 import { RecordImage } from '../images/record-image'
 import { parseDateTimeInput, formatDateTimeInput } from "../../../utils/time";
 import { toaster } from "../../notifications/toaster";
-import { useImageSources } from '../images/use-image-sources'
 import {
   attributesToRows,
   createAttributeRow,
@@ -59,9 +53,9 @@ function resizeTextarea(element: HTMLTextAreaElement | null) {
 }
 
 function EditableImage({
-  source,
-  onError,
-  onRetry,
+  id,
+  draft,
+  store,
   onRemove,
 }: EditableImageProps) {
   return (
@@ -73,12 +67,12 @@ function EditableImage({
       overflow="hidden"
     >
       <RecordImage
-        src={source?.kind === "ready" ? source.url : undefined}
+        src={draft?.url}
+        previewSrc={draft?.previewUrl}
+        imageId={draft ? undefined : id}
+        imageStore={store}
         boxSize="full"
         borderRadius="lg"
-        onError={onError}
-        unavailable={source?.kind === "error"}
-        onRetry={onRetry}
       />
       <IconButton
         type="button"
@@ -106,23 +100,23 @@ export function RecordEditor({
   initialType,
   template,
   onClose,
-  onDiscard,
-  onUploadImages,
-  imageManager,
+  onPickImages,
+  imageStore,
   onSaved,
   onDeleted,
 }: RecordEditorProps) {
   const formId = useId();
+  const session = useRef(0);
+  const draftRef = useRef<DraftImage[]>([]);
+  const [drafts, setDrafts] = useState<DraftImage[]>([]);
   const [rows, setRows] = useState<AttributeRow[]>([]);
   const [imageIds, setImageIds] = useState<string[]>([]);
-  const [imageUploading, setImageUploading] = useState(false);
-  const [closing, setClosing] = useState(false);
+  const [imagePreparing, setImagePreparing] = useState(false);
   const [recordDeleting, setRecordDeleting] = useState(false);
   const [attributeTypeOpen, setAttributeTypeOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(undefined);
   const descriptionRef = useRef<HTMLTextAreaElement | null>(null);
-  const imageInputRef = useRef<HTMLInputElement | null>(null);
-  const imageUploadPromiseRef = useRef<Promise<void> | undefined>(undefined);
+  const imagePreparationRef = useRef<Promise<void> | undefined>(undefined);
   const committingRef = useRef(false);
   const committedRef = useRef(false);
 
@@ -141,14 +135,13 @@ export function RecordEditor({
     },
   });
   const descriptionField = register("description");
-  const {
-    sources: imageSources,
-    addStagedImages,
-    invalidateImage,
-    retryImage,
-  } = useImageSources(imageManager, imageIds, open);
 
   useEffect(() => {
+    session.current++;
+    imagePreparationRef.current = undefined;
+    releaseImages(draftRef.current);
+    draftRef.current = [];
+    setDrafts([]);
     if (!open) return;
     setImageIds(record?.images ?? []);
     reset({
@@ -159,8 +152,7 @@ export function RecordEditor({
     });
     setRows(attributesToRows(record?.attributes ?? {}, template));
     setDeleteTarget(undefined);
-    setImageUploading(false);
-    setClosing(false);
+    setImagePreparing(false);
     setRecordDeleting(false);
     committingRef.current = false;
     committedRef.current = false;
@@ -190,6 +182,10 @@ export function RecordEditor({
   async function confirmDelete() {
     const target = deleteTarget;
     if (target?.kind === "image") {
+      const removed = draftRef.current.filter((image) => image.id === target.id);
+      releaseImages(removed);
+      draftRef.current = draftRef.current.filter((image) => image.id !== target.id);
+      setDrafts([...draftRef.current]);
       setImageIds((current) => current.filter((imageId) => imageId !== target.id));
       setDeleteTarget(undefined);
       return;
@@ -222,14 +218,12 @@ export function RecordEditor({
   async function handleSave(values: RecordEditorValues) {
     // 顶部按钮与键盘提交共用此入口；取消或提交已经开始时不能重复写入。
     if (
-      closing || recordDeleting || committingRef.current || committedRef.current ||
+      recordDeleting || committingRef.current || committedRef.current ||
       !attributesValid
     ) return;
-    // 暂存图片是表单数据的一部分；若用户在压缩/写入 IndexedDB 完成前
-    // 提交，imageIds 仍是旧快照，刚选中的图片会从记录中丢失。
-    if (imageUploading || imageUploadPromiseRef.current) return;
+    if (imagePreparing || imagePreparationRef.current) return;
 
-    const time = parseDateTimeInput(values.time);
+    const time = record && values.time === formatDateTimeInput(record.time) ? record.time : parseDateTimeInput(values.time);
     if (Number.isNaN(time.getTime())) {
       toaster.create({ title: "时间格式不正确", type: "error" });
       return;
@@ -245,7 +239,7 @@ export function RecordEditor({
     };
     committingRef.current = true;
     try {
-      await onSaved(saved, record?.time);
+      await onSaved(saved, draftRef.current.filter((image) => imageIds.includes(image.id)));
       committedRef.current = true;
     } catch (error) {
       committingRef.current = false;
@@ -258,68 +252,39 @@ export function RecordEditor({
     }
   }
 
-  async function handleClose() {
-    if (closing || isSubmitting || recordDeleting || committingRef.current) return;
-    setClosing(true);
-    // 取消动作先等当前批次落库，再做立即孤儿清理，
-    // 避免「清理先结束、图片后写入」留下刚刚选中的孤儿 Blob。
-    try {
-      await imageUploadPromiseRef.current;
-      if (!committingRef.current && !committedRef.current) {
-        try {
-          await onDiscard();
-        } catch (error) {
-          toaster.create({
-            title:
-              "清理图片失败：" +
-              (error instanceof Error ? error.message : String(error)),
-            type: "error",
-          });
-        }
-      }
-      committedRef.current = false;
-      committingRef.current = false;
-      onClose();
-    } finally {
-      setClosing(false);
-    }
+  function handleClose() {
+    if (isSubmitting || recordDeleting || committingRef.current) return;
+    session.current++;
+    releaseImages(draftRef.current);
+    draftRef.current = [];
+    setDrafts([]);
+    imagePreparationRef.current = undefined;
+    onClose();
   }
 
-  async function handleImageChange(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []);
-    event.target.value = "";
-    if (files.length === 0) return;
-    setImageUploading(true);
-    const uploadTask = (async () => {
+  async function handlePickImages() {
+    if (imagePreparing || imagePreparationRef.current || committingRef.current || recordDeleting) return;
+    const currentSession = session.current;
+    setImagePreparing(true);
+    const task = (async () => {
       try {
-        const staged = await onUploadImages(files);
-        addStagedImages(staged);
-        setImageIds((current) => [
-          ...current,
-          ...staged.map((image) => image.id),
-        ]);
+        const images = await onPickImages();
+        if (session.current !== currentSession) { releaseImages(images); return; }
+        draftRef.current.push(...images);
+        setDrafts([...draftRef.current]);
+        setImageIds((current) => [...current, ...images.map((image) => image.id)]);
       } catch (error) {
-        toaster.create({
-          title:
-            "图片上传失败：" +
-            (error instanceof Error ? error.message : String(error)),
-          type: "error",
-        });
+        if (session.current === currentSession) toaster.create({ title: '准备图片失败：' + (error instanceof Error ? error.message : String(error)), type: 'error' });
       }
     })();
-    imageUploadPromiseRef.current = uploadTask;
-    try {
-      await uploadTask;
-    } finally {
-      if (imageUploadPromiseRef.current === uploadTask) {
-        imageUploadPromiseRef.current = undefined;
-      }
-      setImageUploading(false);
+    imagePreparationRef.current = task;
+    try { await task; } finally {
+      if (session.current === currentSession) { imagePreparationRef.current = undefined; setImagePreparing(false); }
     }
   }
 
   const title = record ? "编辑记录" : "新建记录";
-  const busy = closing || isSubmitting || recordDeleting;
+  const busy = isSubmitting || recordDeleting;
   return (
     <>
       <Drawer.Root
@@ -348,10 +313,10 @@ export function RecordEditor({
                   form={formId}
                   variant="plain"
                   flexShrink={0}
-                  disabled={!isValid || !attributesValid || imageUploading || busy}
-                  loading={closing || isSubmitting}
-                  loadingText={closing ? "取消中" : "保存中"}
-                  aria-busy={closing || isSubmitting}
+                  disabled={!isValid || !attributesValid || imagePreparing || busy}
+                  loading={isSubmitting}
+                  loadingText="保存中"
+                  aria-busy={isSubmitting}
                 >
                   保存
                 </Button>
@@ -482,20 +447,12 @@ export function RecordEditor({
                       <Button
                         type="button"
                         variant="subtle"
-                        disabled={imageUploading}
-                        onClick={() => imageInputRef.current?.click()}
+                        disabled={imagePreparing}
+                        onClick={() => void handlePickImages()}
                       >
-                        {imageUploading ? <Spinner size="sm" /> : "添加图片"}
+                        {imagePreparing ? <Spinner size="sm" /> : "添加"}
                       </Button>
                     </Flex>
-                    <Input
-                      ref={imageInputRef}
-                      type="file"
-                      accept="image/*,.heic,.heif"
-                      multiple
-                      display="none"
-                      onChange={handleImageChange}
-                    />
                     {imageIds.length > 0 && (
                       <Flex
                         width="full"
@@ -505,13 +462,13 @@ export function RecordEditor({
                         pb="xs"
                       >
                         {imageIds.map((imageId) => {
-                          const source = imageSources[imageId];
+                          const draft = drafts.find((image) => image.id === imageId);
                           return (
                             <EditableImage
                               key={imageId}
-                              source={source}
-                              onError={() => invalidateImage(imageId)}
-                              onRetry={() => retryImage(imageId)}
+                              id={imageId}
+                              draft={draft}
+                              store={imageStore}
                               onRemove={() => setDeleteTarget({ kind: "image", id: imageId })}
                             />
                           );

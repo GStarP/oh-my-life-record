@@ -1,7 +1,3 @@
-/**
- * 凭证连接验证。用桶级 listImages 区分空桶与 NoSuchBucket；
- * getManifest 的对象级 404 无法区分二者，不能用于验证桶是否存在。
- */
 import { CloudRequestError, cloudErrorMessage } from '../request-error'
 import type { CredentialVerifier, VerifyResult } from './verify.type'
 

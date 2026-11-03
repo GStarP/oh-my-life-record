@@ -1,5 +1,5 @@
 import type { LifeRecord } from '../type'
-import type { ImageManager } from '../images/image-manager.type'
+import type { ImageStore } from '../images/files.type'
 
 export type RecordDayGroup = {
   key: string
@@ -11,16 +11,10 @@ export type RecordListItem =
   | { kind: 'day'; group: RecordDayGroup }
   | { kind: 'record'; record: LifeRecord }
 
-export type InitialRecordLoad = {
-  records: LifeRecord[]
-  nextMonth: string | undefined
-  earliestMonth: string | undefined
-}
-
 export type RecordCardProps = {
   record: LifeRecord
   onOpen: (record: LifeRecord) => void
-  imageManager: ImageManager
+  imageStore: ImageStore
 }
 
 export type RecordAttributeTagsProps = {

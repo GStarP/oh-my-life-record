@@ -16,7 +16,6 @@ import { syncBusyAtom } from "../../features/cloud/state";
 import { LuArrowLeft, LuPlus } from "react-icons/lu";
 import { storage } from "../runtime";
 import { toaster } from "../../features/notifications/toaster";
-import { refreshLocalSyncIndicator } from "../sync-indicator";
 import { TypeTemplateEditor } from "../../features/type-templates/template-editor";
 import {
   typeTemplateDataAtom,
@@ -81,16 +80,15 @@ export function TypeTemplatesPage() {
 
   async function saveTemplate(template: RecordTypeTemplate) {
     await workflow.save(template, editing?.type);
+    const items = await workflow.list();
     updateTypeTemplateData((current) => ({
       ...current,
-      templates: [...current.templates.filter((item) => item.type !== template.type), template]
-        .sort((left, right) => left.type.localeCompare(right.type)),
+      templates: items,
       status: "ready",
       error: undefined,
     }));
     setEditorOpen(false);
     setEditing(undefined);
-    void refreshLocalSyncIndicator().catch(() => {});
     toaster.create({ title: "类型模板已保存", type: "success" });
   }
 
@@ -104,7 +102,6 @@ export function TypeTemplatesPage() {
     }));
     setEditorOpen(false);
     setEditing(undefined);
-    void refreshLocalSyncIndicator().catch(() => {});
     toaster.create({ title: "类型模板已删除", type: "success" });
   }
 

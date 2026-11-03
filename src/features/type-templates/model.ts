@@ -1,4 +1,3 @@
-/** 类型模板的纯校验与归一化逻辑。 */
 import type {
   RecordTypeTemplate,
   TemplateAttribute,
@@ -19,14 +18,11 @@ function isTemplateAttributeKind(value: unknown): value is TemplateAttributeKind
   )
 }
 
-/**
- * 清理表单中的模板草稿：类型名、属性名和选项值去首尾空格；
- * 空选项被忽略，避免出现“看似有选项、实际不能选”的脏配置。
- */
 export function normalizeTemplate(template: RecordTypeTemplate): RecordTypeTemplate {
   return {
     type: template.type.trim(),
     icon: template.icon,
+    ...(template.createdAt === undefined ? {} : { createdAt: template.createdAt }),
     attributes: template.attributes.map((attribute) => {
       const normalized: TemplateAttribute = {
         name: attribute.name.trim(),
@@ -50,6 +46,7 @@ export function validateTemplate(
 ): string | undefined {
   const normalized = normalizeTemplate(template)
   if (!normalized.type) return '请输入类型'
+  if (normalized.createdAt !== undefined && (!Number.isSafeInteger(normalized.createdAt) || normalized.createdAt < 0)) return '模板创建时间不正确'
   const typeExists = new Set(existingTypes)
   if (typeExists.has(normalized.type) && normalized.type !== editingType) {
     return '这个类型已经有模板了'

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">OhMyLife</string>
+    <string name="title_activity_main">OhMyLife</string>
+    <string name="package_name">app.ohmylife.record</string>
+    <string name="custom_url_scheme">app.ohmylife.record</string>
+</resources>

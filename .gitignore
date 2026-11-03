@@ -1,6 +1,10 @@
 node_modules
 .pnpm-store/
 dist
-.env.smoke
-.wrangler
+.env
+.env.*
+!.env.example
 .scratch/
+backups/
+artifacts/
+.DS_Store

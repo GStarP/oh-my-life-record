@@ -3,37 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#f7f7f5" />
-    <meta name="application-name" content="Oh My Life" />
-    <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-title" content="Oh My Life" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-    <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon.png" />
-    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
-    <title>Oh My Life</title>
+    <title>OhMyLife</title>
   </head>
   <body>
-    <div id="root">
-      <div id="boot-status" style="height:100dvh;display:grid;place-content:center;text-align:center;font-family:system-ui;color:#606060">
-        <p id="boot-message">正在打开…</p>
-        <button id="boot-retry" hidden onclick="location.reload()">重试</button>
-      </div>
-    </div>
-    <script>
-      // 首次资源安装未完成时也提供退路；React 挂载后会移除整个占位。
-      function showBootFailure() {
-        const message = document.getElementById('boot-message')
-        if (!message) return
-        message.textContent = '应用资源尚未加载完成，请联网后重试'
-        document.getElementById('boot-retry').hidden = false
-      }
-      window.addEventListener('error', (event) => {
-        if (event.target instanceof HTMLScriptElement) showBootFailure()
-      }, true)
-      setTimeout(showBootFailure, 10000)
-    </script>
+    <div id="root"><p style="padding:2rem;font-family:system-ui">正在打开…</p></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Box, Dialog, Icon, IconButton, Portal, Text, chakra } from '@chakra-ui/react'
 import Panzoom from '@panzoom/panzoom'
-import { LuRefreshCw, LuX } from 'react-icons/lu'
+import { LuX } from 'react-icons/lu'
 import { Image } from '../../../design-system/components/image'
 import type {
   ImagePreviewProps,
@@ -38,9 +38,8 @@ function ImagePreview({ src, onClose, onError }: ImagePreviewProps) {
       size="full"
       motionPreset="none"
       closeOnInteractOutside={false}
-      closeOnEscape={false}
+      onOpenChange={(event) => { if (!event.open) onClose() }}
       initialFocusEl={() => closeRef.current}
-      onEscapeKeyDown={(event) => event.preventDefault()}
     >
       <Portal>
         <Dialog.Positioner
@@ -113,78 +112,41 @@ function ImagePreview({ src, onClose, onError }: ImagePreviewProps) {
   )
 }
 
-/** 隔离图片事件，避免触发父级记录卡片的长按编辑。 */
-export function RecordImage({ src, boxSize, borderRadius, onError, unavailable, onRetry }: RecordImageProps) {
-  // 加载失败时也保留预览层和关闭按钮；资源恢复后使用最新 URL 继续显示。
-  const [previewSource, setPreviewSource] = useState<string>()
-  const thumbnailRef = useRef<HTMLButtonElement>(null)
-  const loadingTimer = useRef<number | undefined>(undefined)
-  const errorHandler = useRef(onError)
-  errorHandler.current = onError
+/** 图片进入可见范围后读取缩略图，点击时读取本体。 */
+export function RecordImage({ src, previewSrc, imageId, imageStore, boxSize, borderRadius, onError, unavailable, onRetry }: RecordImageProps) {
+  const element = useRef<HTMLButtonElement>(null)
+  const [visible, setVisible] = useState(false)
+  const [localSource, setLocalSource] = useState<string>()
+  const [failed, setFailed] = useState(false)
+  const [preview, setPreview] = useState<string>()
+  const [revision, setRevision] = useState(0)
   useEffect(() => {
-    // CORS 直链回退也不能无限停在加载中；缓存/本地 Blob 不需要此网络时限。
-    if (!src?.startsWith('http') || thumbnailRef.current?.querySelector('img')?.complete) return
-    loadingTimer.current = window.setTimeout(() => errorHandler.current(), 10_000)
-    return () => window.clearTimeout(loadingTimer.current)
-  }, [src])
-  return (
-    <>
-      <chakra.button
-        ref={thumbnailRef}
-        type="button"
-        aria-label={unavailable ? '重新加载记录图片' : '查看记录图片'}
-        title={unavailable ? '联网后可加载，点击重试' : undefined}
-        disabled={!src && !unavailable}
-        boxSize={boxSize}
-        flexShrink="0"
-        borderRadius={borderRadius}
-        overflow="hidden"
-        cursor={unavailable ? 'pointer' : src ? 'zoom-in' : 'default'}
-        onPointerDown={(event) => event.stopPropagation()}
-        onPointerUp={(event) => event.stopPropagation()}
-        onKeyDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation()
-          if (unavailable) onRetry()
-          else setPreviewSource(src)
-        }}
-      >
-        {unavailable ? (
-          <Box
-            width="full"
-            height="full"
-            bg="bg.muted"
-            color="fg.muted"
-            display="flex"
-            flexDirection="column"
-            alignItems="center"
-            justifyContent="center"
-            gap="2xs"
-          >
-            <Icon as={LuRefreshCw} boxSize="4" />
-            <Text fontSize="10px">联网后可加载</Text>
-          </Box>
-        ) : (
-          <Image
-            src={src}
-            alt="记录图片"
-            width="full"
-            height="full"
-            borderRadius={borderRadius}
-            objectFit="cover"
-            draggable={false}
-            onError={onError}
-            onLoad={() => window.clearTimeout(loadingTimer.current)}
-          />
-        )}
-      </chakra.button>
-      {previewSource && (
-        <ImagePreview
-          src={src ?? previewSource}
-          onClose={() => setPreviewSource(undefined)}
-          onError={onError}
-        />
-      )}
-    </>
-  )
+    const target = element.current
+    if (!target) return
+    const observer = new IntersectionObserver(([entry]) => { setVisible(entry.isIntersecting) }, { rootMargin: '80px' })
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [])
+  useEffect(() => {
+    let active = true
+    if (!visible || !imageId || !imageStore) return
+    setFailed(false)
+    void imageStore.source(imageId, true).then((url) => { if (active) setLocalSource(url) }).catch(() => { if (active) setFailed(true) })
+    return () => { active = false }
+  }, [imageId, imageStore, visible, revision])
+  const url = src ?? localSource
+  const error = unavailable || failed
+  async function open() {
+    if (error) { setRevision((value) => value + 1); onRetry?.(); return }
+    try {
+      const full = previewSrc ?? (imageId && imageStore ? await imageStore.source(imageId, false) : url)
+      if (full) setPreview(full)
+    } catch { setFailed(true); onError?.() }
+  }
+  return <>
+    <chakra.button ref={element} type="button" aria-label={error ? '重新读取图片' : '查看记录图片'} boxSize={boxSize} flexShrink="0" borderRadius={borderRadius} overflow="hidden" bg="bg.muted" onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); void open() }}>
+      {error ? <Text fontSize="10px" color="fg.muted">读取失败，点击重试</Text> : url && visible ? <Image src={url} alt="记录图片" width="full" height="full" objectFit="cover" draggable={false} onError={() => { setFailed(true); onError?.() }} /> : <Box width="full" height="full" />}
+    </chakra.button>
+    {preview && <ImagePreview src={preview} onClose={() => setPreview(undefined)} onError={() => setFailed(true)} />}
+  </>
 }

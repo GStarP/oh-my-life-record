@@ -1,9 +1,3 @@
-/**
- * 类型模板的非 React 操作层。
- *
- * 页面只调用模板的增删改查，不直接组装 dirty 状态或绕过模板唯一性
- * 约束；IndexedDB 与未来其他存储实现都藏在 StorageAdapter 后面。
- */
 import { normalizeTemplate, validateTemplate } from './model'
 import type {
   TypeTemplateWorkflow,
@@ -13,13 +7,8 @@ import type {
 export function createTypeTemplateWorkflow({
   storage,
 }: TypeTemplateWorkflowOptions): TypeTemplateWorkflow {
-  async function list() {
-    const templates = await storage.getTypeTemplates()
-    return templates.sort((left, right) => left.type.localeCompare(right.type))
-  }
-
   return {
-    list,
+    list: () => storage.getTypeTemplates(),
     find: (type) => storage.getTypeTemplate(type),
     async save(template, editingType) {
       const normalized = normalizeTemplate(template)
@@ -33,8 +22,8 @@ export function createTypeTemplateWorkflow({
         editingType,
       )
       if (validationError) throw new Error(validationError)
-      await storage.putTypeTemplateAndMarkDirty(normalized)
+      await storage.saveTypeTemplate(normalized)
     },
-    remove: (type) => storage.deleteTypeTemplateAndMarkDirty(type),
+    remove: (type) => storage.deleteTypeTemplate(type),
   }
 }

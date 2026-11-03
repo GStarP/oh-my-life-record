@@ -1,73 +1,54 @@
-/**
- * 外部世界单例（与 React 无关，见 docs/设计文档.md「UI 壳与设置页」）。
- * StorageAdapter 与应用同生命周期；R2 适配器随凭证变化重建（currentCloud）。
- */
-import { IndexedDbStorage } from '../features/storage/indexeddb'
+import { withDeadline } from '../utils/deadline'
+import { Capacitor } from '@capacitor/core'
+import schema from '../features/storage/schema.sql?raw'
+import { nativeData, nativeSql } from '../features/storage/native'
+import { SqliteStorage } from '../features/storage/sqlite'
+import { initializePreferences, writePreference } from '../features/preferences/device'
 import { R2CloudAdapter } from '../features/cloud/r2/r2'
-import type { R2Config } from '../features/cloud/cloud.type'
-import {
-  cloudResourceNamespace,
-  getCredential,
-  hasCredential,
-} from '../features/cloud/credential/credential'
-import { createImageManager } from '../features/records/images/image-manager'
-import { clearImageCache } from '../features/records/images/image-cache'
-import type { ImageManager } from '../features/records/images/image-manager.type'
+import { getCredential } from '../features/cloud/credential/credential'
+import { createImageStore } from '../features/records/images/files'
+import type { BackupState, DeviceBackupState, SyncContext } from '../features/cloud/sync/engine.type'
 
-/** 本地存储单例（生产数据库名）。 */
-export const storage = new IndexedDbStorage('omlr')
-
-/** 清空云端、本机数据及图片缓存；可重复执行，完成后由设置页刷新。 */
-export async function clearAllData(config: R2Config): Promise<void> {
-  await new R2CloudAdapter(config).clearAllData()
-  await clearImageCache()
-  await storage.clearAllData()
+export const storage = new SqliteStorage(nativeSql)
+export const imageStore = createImageStore(storage)
+export async function initializeRuntime(): Promise<void> {
+  if (!Capacitor.isNativePlatform()) throw new Error('请在 Android 应用中打开')
+  const result = await nativeData.initialize({ schema })
+  initializePreferences(result.preferences)
+  await storage.inspect()
 }
-
-let cachedCredential: R2Config | undefined
-let cachedCloud: R2CloudAdapter | undefined
-
-function sameCredential(left: R2Config | undefined, right: R2Config): boolean {
-  return Boolean(
-    left &&
-    left.endpoint === right.endpoint &&
-    left.bucket === right.bucket &&
-    left.accessKeyId === right.accessKeyId &&
-    left.accessKeySecret === right.accessKeySecret,
-  )
-}
-
-/**
- * 按当前凭证取得 R2 适配器；凭证未变化时复用同一个实例，凭证变化时重建。
- * 无可用凭证返回 undefined；不影响本地记录和图片暂存。
- */
 export function currentCloud(): R2CloudAdapter | undefined {
-  const credential = getCredential()
-  if (!credential || !hasCredential(credential)) {
-    cachedCredential = undefined
-    cachedCloud = undefined
-    return undefined
-  }
-  if (!cachedCloud || !sameCredential(cachedCredential, credential)) {
-    cachedCredential = credential
-    try {
-      cachedCloud = new R2CloudAdapter(credential)
-    } catch {
-      // 本地凭证损坏时也允许进入应用，由用户主动打开连接面板修复。
-      cachedCloud = undefined
-    }
-  }
-  return cachedCloud
+  const config = getCredential()
+  return config ? new R2CloudAdapter(config) : undefined
 }
-
-/**
- * 应用生命周期内唯一的图片管理器。
- *
- * ImageManager 本身不依赖 React；React 组件只通过 lease 使用它。把实例
- * 放在 runtime 之后，记录页切换、编辑器开关都不会丢失图片资源缓存。
- */
-export const imageManager: ImageManager = createImageManager({
-  storage,
-  getCloud: currentCloud,
-  getImageNamespace: () => cloudResourceNamespace(getCredential()),
-})
+const deadline = <T>(work: Promise<T>, message: string) => withDeadline(work, 30_000, message)
+export function syncContext(confirmConflict: SyncContext['confirmConflict'], progress: SyncContext['progress']): SyncContext {
+  return {
+    begin: (operationId) => deadline(nativeData.beginSync({ operationId }), '同步初始化超时'),
+    end: (operationId) => deadline(nativeData.endSync({ operationId }), '同步结束超时'),
+    prepare: (operationId, folder) => deadline(nativeData.prepareTransfer({ operationId, folder }), '工作目录准备超时'),
+    snapshot: (operationId) => deadline(nativeData.snapshot({ operationId }), '数据库快照超时'),
+    info: async (path, verify = false) => (await deadline(nativeData.fileInfo({ path, verify }), '文件检查超时')).file,
+    activate: (operationId, path, images, namespace, state) => deadline(nativeData.activate({ operationId, path, images, receipt: { key: 'sync-state', value: JSON.stringify({ ...state, namespace }) } }), '安装数据库超时'),
+    adoptImage: (operationId, source, path) => deadline(nativeData.adoptImage({ operationId, source, path }), '图片恢复超时'),
+    align: (operationId, paths) => deadline(nativeData.alignImages({ operationId, paths }), '图片对齐超时'),
+    freeSpace: async () => (await deadline(nativeData.availableSpace(), '存储空间检查超时')).bytes,
+    async loadState(namespace): Promise<BackupState> {
+      const { value: text } = await deadline(nativeData.readPreference({ key: 'sync-state' }), '同步状态读取超时')
+      try {
+        if (!text) return { revision: 0, sequence: 0 }
+        const { namespace: savedNamespace, ...state }: DeviceBackupState = JSON.parse(text)
+        if (savedNamespace !== namespace) return { revision: 0, sequence: 0 }
+        if (![state.revision, state.sequence].every((value) => Number.isSafeInteger(value) && value >= 0)) throw new Error()
+        if (state.revision > 0 && !/^[a-f0-9]{64}$/.test(state.sha256 ?? '')) throw new Error()
+        return state
+      } catch { throw new Error('同步状态损坏') }
+    },
+    saveState: (namespace, state) => deadline(writePreference('sync-state', JSON.stringify({ ...state, namespace })), '同步状态保存超时'),
+    confirmConflict, progress,
+    async observe(operationId, onBytes) {
+      const listener = await deadline(nativeData.addListener('transferProgress', (event) => { if (event.operationId === operationId) onBytes(event.key, event.bytes) }), '进度事件订阅超时')
+      return () => withDeadline(listener.remove(), 5_000, '进度事件释放超时')
+    },
+  }
+}

@@ -1,546 +1,138 @@
-/**
- * 同步引擎测试：验证全部同步决策的外部行为。
- *
- * 为什么测它：同步是本应用正确性的核心——方向判定错、冲突未否决、
- * 提交点不幂等，都会造成数据丢失或两端不一致，且极难在运行时发现。
- * 引擎是纯 TS、依赖注入，故用 InMemoryStorage / InMemoryCloud 替身
- * 在 Node 环境断言行为结果，不触碰浏览器。
- *
- * 只测外部行为：断言「发生了什么 + 最终状态」，不断言内部调用序列。
- */
-import { describe, it, expect } from 'vitest'
-import { checkForUpdates, sync } from '../src/features/cloud/sync/engine'
-import { InMemoryStorage } from './helpers/inmemory.storage'
-import { InMemoryCloud } from './helpers/inmemory.cloud'
-import { recordFixture } from './helpers/record'
+import { describe, expect, it, vi } from 'vitest'
+import { sync } from '../src/features/cloud/sync/engine'
+import type { BackupState, SyncContext } from '../src/features/cloud/sync/engine.type'
+import type { CloudAdapter, CloudSnapshot } from '../src/features/cloud/cloud.type'
+import type { DatabaseInfo, ImageFile, StorageAdapter } from '../src/features/storage/type'
+import type { NativeFile } from '../src/features/storage/native.type'
 
-/** 供 sync 使用的「总是确认」回调。 */
-const alwaysConfirm = async () => true
+const image = (id: string): ImageFile => ({ id, path: `images/${id}.webp`, mime: 'image/webp', bytes: 3, sha256: id.repeat(64) })
+function environment() {
+  let state: BackupState = { revision: 0, sequence: 0 }
+  let local: DatabaseInfo = { sequence: 1, recordCount: 1, images: [image('a'), image('b')] }
+  const target: DatabaseInfo = { sequence: 8, recordCount: 4, images: [image('a'), image('b')] }
+  let remote: CloudSnapshot | undefined
+  const files = new Map<string, NativeFile>(local.images.map((file) => [file.path, file]))
+  const objects = new Map<string, number>([['images/a.webp', 3], ['images/extra.webp', 3]])
+  const events: string[] = []
+  const context: SyncContext = {
+    begin: vi.fn(async () => { events.push('begin') }), end: vi.fn(async () => { events.push('end') }),
+    prepare: vi.fn(async () => {}),
+    loadState: async () => structuredClone(state),
+    saveState: async (_, value) => { state = structuredClone(value) },
+    snapshot: async () => ({ path: 'transfers/test/database.sqlite', bytes: 42, sha256: 'd'.repeat(64) }),
+    info: async (path) => files.get(path),
+    freeSpace: async () => 1024 ** 3,
+    activate: vi.fn(async (_, path, __, ___, receipt) => { events.push('activate'); local = target; files.delete(path); state = receipt }),
+    adoptImage: vi.fn(async () => {}), align: vi.fn(async () => { events.push('align') }),
+    confirmConflict: vi.fn(async () => true), progress: vi.fn(), observe: async () => async () => {},
+  }
+  const cloud: CloudAdapter = {
+    namespace: 'test', getSnapshot: async () => remote,
+    listImages: async () => [...objects].map(([path, bytes]) => ({ path, bytes })),
+    uploadImage: vi.fn(async (path) => { events.push('upload:' + path); objects.set(path, 3) }),
+    uploadSnapshot: vi.fn(async (file, revision) => { events.push('snapshot'); remote = { ...file, revision, etag: 'etag-' + revision } }),
+    download: vi.fn(async (key, path, sha256) => { const file = { path, sha256, bytes: key === 'database.sqlite' ? 42 : 3 }; files.set(path, file); return file }),
+    deleteImage: vi.fn(async (path) => { events.push('delete:' + path); objects.delete(path) }),
+  }
+  const storage = { inspect: async (path?: string) => path ? target : local, getTypeTemplates: async () => [] } as unknown as StorageAdapter
+  return { context, cloud, storage, files, objects, events, setRemote: (value: CloudSnapshot) => { remote = value }, setState: (value: BackupState) => { state = value }, getState: () => state, setLocal: (value: DatabaseInfo) => { local = value }, target }
+}
 
-describe('checkForUpdates：指示器推导（只读，不改数据）', () => {
-  it('云端有更新 → download（↓）', async () => {
-    // 云端 revision 高于本地已确认值：可下载。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 3,
-      dirty: false,
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
-
-    await expect(checkForUpdates(storage, cloud)).resolves.toBe('download')
+describe('数据库快照同步', () => {
+  it('阶段展示尚未就绪时不开始该阶段的操作', async () => {
+    // 界面需要为快速步骤保留最短阅读时间。同步必须等待阶段通知完成，
+    // 否则多个步骤仍会在同一帧覆盖状态文字；传输数量更新无需逐个等待。
+    // 在提交阶段拦住通知，预期云端快照尚未写入，放行后才完成备份。
+    const env = environment()
+    let release!: () => void, entered!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const ready = new Promise<void>((resolve) => { entered = resolve })
+    env.context.progress = async (progress) => {
+      if (progress.stage === '提交数据库快照') { entered(); await gate }
+    }
+    const work = sync(env)
+    try {
+      await ready
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(env.cloud.uploadSnapshot).not.toHaveBeenCalled()
+    } finally { release(); await work }
+    expect(env.cloud.uploadSnapshot).toHaveBeenCalledTimes(1)
   })
-
-  it('本地有未上传修改且云端无更新 → upload（↑）', async () => {
-    // 版本一致但本地 dirty：可上传。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 5,
-      dirty: true,
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
-
-    await expect(checkForUpdates(storage, cloud)).resolves.toBe('upload')
+  it('仅传缺失图片，快照提交成功后才传播删除', async () => {
+    // 云端已有 a，缺少 b，另有多余文件。删除必须在完整快照提交之后，
+    // 否则备份提交失败会破坏仍有效的云端快照；已完成图片也不应重复传输。
+    const env = environment()
+    await expect(sync(env)).resolves.toBe('uploaded')
+    expect(env.cloud.uploadImage).toHaveBeenCalledTimes(1)
+    expect(env.cloud.uploadImage).toHaveBeenCalledWith('images/b.webp', 'image/webp', expect.any(String))
+    expect(env.events.indexOf('snapshot')).toBeLessThan(env.events.indexOf('delete:images/extra.webp'))
+    expect(env.getState()).toEqual({ revision: 1, sequence: 1, sha256: 'd'.repeat(64) })
+    expect(env.events.at(-1)).toBe('end')
   })
-
-  it('云端有更新且本地有未上传修改（同月冲突）→ 指示器显示 download（云端更新优先）', async () => {
-    // 同月「云端更高 + 本地 dirty」是冲突，在 sync 时判断，不单列按钮状态；
-    // 指示器只反映「有下载需求」，显示 ↓。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 3,
-      dirty: true,
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
-
-    await expect(checkForUpdates(storage, cloud)).resolves.toBe('download')
+  it('提交回包丢失时保留回执，下次核对成功后只完成剩余对齐', async () => {
+    // 模拟对象已提交，但客户端只收到网络错误。此时不能报告成功，也不能提前删除图片。
+    // 再次手动同步应通过摘要和版本识别自己的提交，避免误报双端冲突或重复上传数据库。
+    const env = environment()
+    const upload = env.cloud.uploadSnapshot
+    env.cloud.uploadSnapshot = vi.fn(async (file, revision, etag, id) => { await upload(file, revision, etag, id); throw new Error('响应丢失') })
+    await expect(sync(env)).rejects.toThrow('响应丢失')
+    expect(env.getState().pending).toBeDefined()
+    expect(env.objects.has('images/extra.webp')).toBe(true)
+    expect(env.events.at(-1)).toBe('end')
+    await expect(sync(env)).resolves.toBe('already-latest')
+    expect(env.cloud.uploadSnapshot).toHaveBeenCalledTimes(1)
+    expect(env.context.confirmConflict).not.toHaveBeenCalled()
+    expect(env.objects.has('images/extra.webp')).toBe(false)
+    expect(env.getState().pending).toBeUndefined()
   })
-
-  it('全部一致 → none（无角标）', async () => {
-    // 本地确认版本与云端相同且没有未上传修改时，不应误亮上传或下载状态，
-    // 否则用户每次进入应用都会看到一个实际无法执行任何工作的同步提示。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 5,
-      dirty: false,
+  it('恢复中断保留当前数据，下次复用完整文件并在最后安装数据库', async () => {
+    // 第一次下载图片失败，当前可用数据库不得替换。第二次重试只补缺失文件，
+    // 完整数据库快照由工作目录复用；所有图片齐全后才原子安装，并保存恢复回执。
+    const env = environment()
+    env.setState({ revision: 1, sequence: 1, sha256: 'd'.repeat(64) })
+    env.setRemote({ revision: 2, bytes: 42, sha256: 'c'.repeat(64), etag: 'remote-2' })
+    env.files.delete('images/b.webp')
+    env.objects.set('images/b.webp', 3)
+    const download = env.cloud.download
+    env.cloud.download = vi.fn(async (key, path, sha, id, etag) => {
+      if (key === 'images/b.webp') throw new Error('网络中断')
+      return download(key, path, sha, id, etag)
     })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
-
-    await expect(checkForUpdates(storage, cloud)).resolves.toBe('none')
+    await expect(sync(env)).rejects.toThrow('网络中断')
+    expect(env.context.activate).not.toHaveBeenCalled()
+    expect(env.getState().revision).toBe(1)
+    env.cloud.download = vi.fn((key, path, sha, id, etag) => download(key, path, sha, id, etag))
+    await expect(sync(env)).resolves.toBe('downloaded')
+    expect(env.cloud.download).toHaveBeenCalledTimes(1)
+    expect(env.cloud.download).toHaveBeenCalledWith('images/b.webp', expect.stringContaining('/images/b.webp'), 'b'.repeat(64), expect.any(String))
+    expect(env.getState()).toEqual({ revision: 2, sequence: 8, sha256: 'c'.repeat(64) })
+    expect(env.context.activate).toHaveBeenCalledTimes(1)
   })
-
-  it('一个月可上传、一个月可下载（不同月）→ both（↑↓ 同时显示）', async () => {
-    // 不同月份方向并存：8 月上传、7 月下载，都是正常同步，↑↓ 同时亮。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 5,
-      dirty: true,
-    })
-    await storage.putPartitionState({
-      month: '2026-07',
-      remoteRevision: 1,
-      dirty: false,
-    })
-    await cloud.putManifest({
-      schemaVersion: 1,
-      partitions: { '2026-08': 5, '2026-07': 2 },
-      typeTemplatesRevision: 0,
-    })
-
-    await expect(checkForUpdates(storage, cloud)).resolves.toBe('both')
-  })
-})
-
-describe('sync：方向判定', () => {
-  it('云端更高且本地无修改 → 下载覆盖本地，返回 downloaded', async () => {
-    // 纯下载：云端文件全量替换本地该月，状态复位为云端 revision。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.upsertRecord(recordFixture('old', '2026-08-01T10:00:00+08:00'))
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 3,
-      dirty: false,
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
-    await cloud.putPartitionFile({
-      month: '2026-08',
-      revision: 5,
-      records: [recordFixture('new', '2026-08-10T10:00:00+08:00')],
-    })
-
-    const result = await sync(storage, cloud, alwaysConfirm)
-
-    expect(result.outcome).toBe('downloaded')
-    expect((await storage.getRecordsInMonth('2026-08')).map((r) => r.id)).toEqual(
-      ['new'],
-    )
-    expect(await storage.getPartitionState('2026-08')).toEqual({
-      month: '2026-08',
-      remoteRevision: 5,
-      dirty: false,
-    })
-  })
-
-  it('版本一致且本地 dirty → 上传覆盖云端，返回 uploaded', async () => {
-    // 纯上传：本地生成月 JSON（revision +1）并 PUT manifest，本地 dirty 复位。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.upsertRecord(recordFixture('a', '2026-08-02T10:00:00+08:00'))
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 5,
-      dirty: true,
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
-
-    const result = await sync(storage, cloud, alwaysConfirm)
-
-    expect(result.outcome).toBe('uploaded')
-    const file = await cloud.getPartitionFile('2026-08')
-    expect(file?.revision).toBe(6)
-    expect(file?.records.map((r) => r.id)).toEqual(['a'])
-    expect((await cloud.getManifest())?.partitions['2026-08']).toBe(6)
-    expect(await storage.getPartitionState('2026-08')).toEqual({
-      month: '2026-08',
-      remoteRevision: 6,
-      dirty: false,
-    })
-  })
-
-  it('全部一致且无修改 → already-latest', async () => {
-    // 真正执行同步时也必须识别无事可做的状态，既不改本地/云端数据，
-    // 也不把正常空操作误报成上传或下载成功。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 5,
-      dirty: false,
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
-
-    await expect(sync(storage, cloud, alwaysConfirm)).resolves.toMatchObject({
-      outcome: 'already-latest',
-      brokenMonths: [],
-    })
+  it('双端修改取消后不进入执行阶段；恢复空间不足也不替换数据', async () => {
+    // 冲突确认是执行前唯一的取消入口。拒绝覆盖必须零写入。
+    // 同意之后仍要预估缺失文件空间；空间不足时释放会话并保持数据库可用。
+    const env = environment()
+    env.setRemote({ revision: 2, bytes: 42, sha256: 'c'.repeat(64), etag: 'remote-2' })
+    env.context.confirmConflict = async () => false
+    await expect(sync(env)).resolves.toBe('aborted')
+    expect(env.context.begin).not.toHaveBeenCalled()
+    env.context.confirmConflict = async () => true
+    env.context.freeSpace = async () => 0
+    await expect(sync(env)).rejects.toThrow('空间不足')
+    expect(env.context.activate).not.toHaveBeenCalled()
+    expect(env.events.at(-1)).toBe('end')
   })
 })
 
-describe('sync：不同月同时上传与下载', () => {
-  it('a 月下载、b 月上传同时完成，返回 synced', async () => {
-    // 关键语义：下载与上传按「月」粒度互不干扰。8 月云端有更新（下载）、
-    // 7 月本地 dirty（上传），本次同时完成两者。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.upsertRecord(recordFixture('jul', '2026-07-05T10:00:00+08:00'))
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 3,
-      dirty: false,
-    })
-    await storage.putPartitionState({
-      month: '2026-07',
-      remoteRevision: 1,
-      dirty: true,
-    })
-    await cloud.putManifest({
-      schemaVersion: 1,
-      partitions: { '2026-08': 5, '2026-07': 1 },
-      typeTemplatesRevision: 0,
-    })
-    await cloud.putPartitionFile({
-      month: '2026-08',
-      revision: 5,
-      records: [recordFixture('aug', '2026-08-10T10:00:00+08:00')],
-    })
-
-    const result = await sync(storage, cloud, alwaysConfirm)
-
-    expect(result.outcome).toBe('synced')
-    // 8 月被下载覆盖。
-    expect((await storage.getRecordsInMonth('2026-08')).map((r) => r.id)).toEqual(
-      ['aug'],
-    )
-    // 7 月被上传，dirty 复位。
-    expect((await storage.getPartitionState('2026-07'))?.dirty).toBe(false)
-    expect((await cloud.getPartitionFile('2026-07'))?.revision).toBe(2)
-  })
-})
-
-describe('sync：冲突一票否决', () => {
-  it('冲突且确认 → 云端覆盖本地，返回 downloaded', async () => {
-    // 云端 revision 更高且本地 dirty 时必须先暴露冲突月份；用户确认后
-    // 才允许按云端优先规则覆盖本地，不能静默丢失本地修改。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.upsertRecord(recordFixture('local', '2026-08-02T10:00:00+08:00'))
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 3,
-      dirty: true,
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
-    await cloud.putPartitionFile({
-      month: '2026-08',
-      revision: 5,
-      records: [recordFixture('cloud', '2026-08-10T10:00:00+08:00')],
-    })
-
-    let captured: string[] | undefined
-    const result = await sync(storage, cloud, async (months) => {
-      captured = months
-      return true
-    })
-
-    expect(result.outcome).toBe('downloaded')
-    // 确认回调收到冲突月份列表（仅月份，无需更细信息）。
-    expect(captured).toEqual(['2026-08'])
-    // 本地被云端覆盖，本地修改丢失。
-    expect((await storage.getRecordsInMonth('2026-08')).map((r) => r.id)).toEqual(
-      ['cloud'],
-    )
-  })
-
-  it('冲突且取消 → 整体中止，本地与云端零变更，返回 aborted', async () => {
-    // 用户拒绝云端覆盖时，一票否决必须发生在任何上传或下载之前；
-    // 首次无凭证记录的已确认版本为 0；后来连接已有同月数据的桶也必须
-    // 确认冲突。取消后本地记录、模板、待上传图片、dirty 及云端都保持原状。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.upsertRecordAndMarkDirty(
-      recordFixture('local', '2026-08-02T10:00:00+08:00', { images: ['pending'] }),
-      ['2026-08'],
-    )
-    await storage.putImageBlob('pending', new Blob(['pending image']))
-    await storage.putTypeTemplateAndMarkDirty({ type: '本地模板', icon: 'wallet', attributes: [] })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 1, partitions: { '2026-08': 5 } })
-    await cloud.putPartitionFile({
-      month: '2026-08',
-      revision: 5,
-      records: [recordFixture('cloud', '2026-08-10T10:00:00+08:00')],
-    })
-
-    const result = await sync(storage, cloud, async (months, templatesConflict) => {
-      expect(months).toEqual(['2026-08'])
-      expect(templatesConflict).toBe(true)
-      return false
-    })
-
-    expect(result.outcome).toBe('aborted')
-    // 本地修改未被覆盖、dirty 保持。
-    expect((await storage.getRecordsInMonth('2026-08')).map((r) => r.id)).toEqual(
-      ['local'],
-    )
-    expect((await storage.getPartitionState('2026-08'))?.dirty).toBe(true)
-    // 云端文件与 manifest 未被改动。
-    expect(
-      (await cloud.getPartitionFile('2026-08'))?.records.map((r) => r.id),
-    ).toEqual(['cloud'])
-    expect((await cloud.getManifest())?.partitions['2026-08']).toBe(5)
-    expect((await storage.getPartitionState('2026-08'))?.remoteRevision).toBe(0)
-    expect(await storage.getImageBlob('pending')).toBeDefined()
-    expect(await cloud.listImages()).toEqual([])
-    expect((await storage.getTypeTemplates()).map((template) => template.type)).toEqual(['本地模板'])
-    expect((await storage.getTypeTemplateState())?.dirty).toBe(true)
-  })
-})
-
-describe('sync：下载校验失败 → 收集进 brokenMonths', () => {
-  it('云端声称有该月但文件缺失 → 不覆盖本地，报告 brokenMonths', async () => {
-    // manifest 说 2026-08 版本为 5，但云端文件读不到（缺失/损坏）：
-    // 不覆盖本地、不持久化任何状态，仅在返回报告里列出该月，供 UI 弹窗提示。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.upsertRecord(recordFixture('local', '2026-08-02T10:00:00+08:00'))
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 3,
-      dirty: false,
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
-    // 未 putPartitionFile：模拟云端文件缺失。
-
-    const result = await sync(storage, cloud, alwaysConfirm)
-
-    expect(result.outcome).toBe('already-latest')
-    expect(result.brokenMonths).toEqual(['2026-08'])
-    // 本地同步状态未被改动（不持久化损坏状态）。
-    expect(await storage.getPartitionState('2026-08')).toEqual({
-      month: '2026-08',
-      remoteRevision: 3,
-      dirty: false,
-    })
-    // 本地记录未被覆盖。
-    expect((await storage.getRecordsInMonth('2026-08')).map((r) => r.id)).toEqual(
-      ['local'],
-    )
-  })
-
-  it('分片 revision 与 manifest 不一致 → 不覆盖本地，报告 brokenMonths', async () => {
-    // manifest 是云端提交点；如果分片文件来自另一次未提交的写入，
-    // 就不能把它当成 manifest 指向的版本落到本地，否则下一次检查会
-    // 错误地把本地版本当成领先云端。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.upsertRecord(recordFixture('local', '2026-08-02T10:00:00+08:00'))
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 3,
-      dirty: false,
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
-    await cloud.putPartitionFile({
-      month: '2026-08',
-      revision: 6,
-      records: [recordFixture('unexpected', '2026-08-10T10:00:00+08:00')],
-    })
-
-    const result = await sync(storage, cloud, alwaysConfirm)
-
-    expect(result.outcome).toBe('already-latest')
-    expect(result.brokenMonths).toEqual(['2026-08'])
-    expect((await storage.getRecordsInMonth('2026-08')).map((r) => r.id)).toEqual(
-      ['local'],
-    )
-    expect(await storage.getPartitionState('2026-08')).toEqual({
-      month: '2026-08',
-      remoteRevision: 3,
-      dirty: false,
-    })
-  })
-})
-
-describe('sync：图片上传集合（仅「被引用且本地暂存存在」）', () => {
-  it('只传被记录引用且暂存存在的图；孤儿与已上传图都不传', async () => {
-    // img1：被引用 + 暂存存在 → 上传，且上传后删除暂存。
-    // img2：暂存存在 + 无记录引用（孤儿）→ 不上传。
-    // img3：被引用 + 暂存不存在（已上传）→ 不上传。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.upsertRecord(
-      recordFixture('a', '2026-08-02T10:00:00+08:00', {
-        images: ['img1', 'img3'],
-      }),
-    )
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 5,
-      dirty: true,
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
-    await storage.putImageBlob('img1', new Blob(['1']))
-    await storage.putImageBlob('img2', new Blob(['2']))
-
-    await sync(storage, cloud, alwaysConfirm)
-
-    // 云端图片集合经 listImages 断言（CloudAdapter 无 getImage——图片显示
-    // 走签名 URL，见 cloud.type.ts 注释）：只出现被引用且暂存存在的 img1。
-    expect(await cloud.listImages()).toEqual(['img1'])
-    // 上传成功后本地暂存删除（存在即待上传的推断不失真）。
-    expect(await storage.getImageBlob('img1')).toBeUndefined()
-  })
-})
-
-describe('sync：上传提交点幂等（manifest 失败自愈）', () => {
-  it('manifest 提交失败 → 抛错且 dirty 保持；重试成功', async () => {
-    // manifest 是上传提交点：分片已写但 manifest 失败时不能清除 dirty；
-    // 下一次重试应安全覆盖同一分片并最终提交，避免形成无法恢复的半成功状态。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.upsertRecord(recordFixture('a', '2026-08-02T10:00:00+08:00'))
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 5,
-      dirty: true,
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: { '2026-08': 5 } })
-
-    // 第一次：manifest 提交失败。
-    cloud.failPutManifest = true
-    await expect(sync(storage, cloud, alwaysConfirm)).rejects.toThrow()
-    // 本地 dirty 未复位（等待重试）。
-    expect((await storage.getPartitionState('2026-08'))?.dirty).toBe(true)
-    // 月份文件已写入（幂等，重试会覆盖）。
-    expect((await cloud.getPartitionFile('2026-08'))?.revision).toBe(6)
-
-    // 重试：成功。
-    cloud.failPutManifest = false
-    const result = await sync(storage, cloud, alwaysConfirm)
-    expect(result.outcome).toBe('uploaded')
-    expect((await cloud.getManifest())?.partitions['2026-08']).toBe(6)
-    expect((await storage.getPartitionState('2026-08'))?.dirty).toBe(false)
-  })
-})
-
-describe('sync：类型模板作为独立全局集合同步', () => {
-  it('本地模板 dirty 且云端版本一致 → 上传模板文件并复位全局状态', async () => {
-    // 模板不是某个月份记录的附属数据：即使没有任何记录分片 dirty，模板
-    // 也必须独立触发上传，并在同一个 manifest 提交点后复位本地状态。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.putTypeTemplateAndMarkDirty({
-      type: '记账',
-      icon: 'wallet',
-      attributes: [{ name: '费用', kind: 'number' }],
-    })
-    await cloud.putManifest({ schemaVersion: 1, typeTemplatesRevision: 0, partitions: {} })
-
-    const result = await sync(storage, cloud, alwaysConfirm)
-
-    expect(result.outcome).toBe('uploaded')
-    expect(await cloud.getTypeTemplatesFile()).toEqual({
-      revision: 1,
-      templates: [{ type: '记账', icon: 'wallet', attributes: [{ name: '费用', kind: 'number' }] }],
-    })
-    expect((await cloud.getManifest())?.typeTemplatesRevision).toBe(1)
-    expect(await storage.getTypeTemplateState()).toEqual({
-      remoteRevision: 1,
-      dirty: false,
-    })
-  })
-
-  it('云端模板版本更高且本地不 dirty → 下载并替换本地模板集合', async () => {
-    // 云端模板是全局集合，下载必须清掉本地已经不存在于云端的模板，且
-    // revision/dirty 与集合一起更新，避免下一次检查重复下载。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.putTypeTemplateAndMarkDirty({ type: '旧模板', icon: 'library', attributes: [] })
-    await storage.putTypeTemplateState({ remoteRevision: 1, dirty: false })
-    await cloud.putManifest({
-      schemaVersion: 1,
-      partitions: {},
-      typeTemplatesRevision: 2,
-    })
-    await cloud.putTypeTemplatesFile({
-      revision: 2,
-      templates: [{ type: '新模板', icon: 'wallet', attributes: [{ name: '费用', kind: 'number' }] }],
-    })
-
-    const result = await sync(storage, cloud, alwaysConfirm)
-
-    expect(result.outcome).toBe('downloaded')
-    expect(await storage.getTypeTemplates()).toEqual([
-      { type: '新模板', icon: 'wallet', attributes: [{ name: '费用', kind: 'number' }] },
-    ])
-    expect(await storage.getTypeTemplateState()).toEqual({
-      remoteRevision: 2,
-      dirty: false,
-    })
-  })
-
-  it('云端模板文件 revision 与 manifest 不一致 → 保留本地模板并报告损坏', async () => {
-    // 模板文件和 manifest 必须属于同一次提交；即使文件结构本身合法，
-    // 版本错配也不能替换本地模板，否则表单规则可能回到未提交的快照。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.putTypeTemplateAndMarkDirty({
-      type: '本地模板',
-      icon: 'library',
-      attributes: [],
-    })
-    await storage.putTypeTemplateState({ remoteRevision: 1, dirty: false })
-    await cloud.putManifest({
-      schemaVersion: 1,
-      partitions: {},
-      typeTemplatesRevision: 2,
-    })
-    await cloud.putTypeTemplatesFile({
-      revision: 3,
-      templates: [{ type: '意外模板', icon: 'wallet', attributes: [] }],
-    })
-
-    const result = await sync(storage, cloud, alwaysConfirm)
-
-    expect(result.outcome).toBe('already-latest')
-    expect(result.brokenTypeTemplates).toBe(true)
-    expect(await storage.getTypeTemplates()).toEqual([
-      { type: '本地模板', icon: 'library', attributes: [] },
-    ])
-    expect(await storage.getTypeTemplateState()).toEqual({
-      remoteRevision: 1,
-      dirty: false,
-    })
-  })
-
-  it('模板冲突取消时整体中止，不覆盖本地模板', async () => {
-    // 全局模板与记录月份一样遵守云端优先但必须先确认；用户取消时不能
-    // 只下载模板或只改同步状态，整个同步操作保持零变更。
-    const storage = new InMemoryStorage()
-    const cloud = new InMemoryCloud()
-    await storage.putTypeTemplateAndMarkDirty({ type: '本地模板', icon: 'library', attributes: [] })
-    await storage.putTypeTemplateState({ remoteRevision: 1, dirty: true })
-    await cloud.putManifest({
-      schemaVersion: 1,
-      partitions: {},
-      typeTemplatesRevision: 2,
-    })
-    await cloud.putTypeTemplatesFile({
-      revision: 2,
-      templates: [{ type: '云端模板', icon: 'book-open', attributes: [] }],
-    })
-
-    const result = await sync(storage, cloud, async (_months, templateConflict) => {
-      expect(templateConflict).toBe(true)
-      return false
-    })
-
-    expect(result.outcome).toBe('aborted')
-    expect(await storage.getTypeTemplates()).toEqual([
-      { type: '本地模板', icon: 'library', attributes: [] },
-    ])
-    expect(await storage.getTypeTemplateState()).toEqual({
-      remoteRevision: 1,
-      dirty: true,
-    })
-  })
+it('安装中断后，校验并复用已经移入本体目录、尚未被当前数据库引用的图片', async () => {
+  // 文件移动和数据库替换之间可能退出。此时本体已经完整落盘，但当前数据库还没有它的元信息。
+  // 下一次恢复应核对 SHA 后复用，避免把同一批 GB 图片重新下载一份。
+  const env = environment()
+  env.setState({ revision: 1, sequence: 1, sha256: 'd'.repeat(64) })
+  env.setLocal({ sequence: 1, recordCount: 1, images: [] })
+  env.objects.set('images/b.webp', 3)
+  env.setRemote({ revision: 2, bytes: 42, sha256: 'c'.repeat(64), etag: 'remote-2' })
+  await expect(sync(env)).resolves.toBe('downloaded')
+  expect(env.cloud.download).toHaveBeenCalledTimes(1)
+  expect(env.cloud.download).toHaveBeenCalledWith('database.sqlite', expect.any(String), 'c'.repeat(64), expect.any(String), 'remote-2')
 })

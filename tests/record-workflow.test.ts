@@ -1,91 +1,41 @@
-/** 记录写操作的公开契约：原子标脏、跨月语义与图片清理。 */
-import { describe, expect, it } from 'vitest'
+import { expect, it } from 'vitest'
 import { createRecordWorkflow } from '../src/features/records/record-workflow'
-import { InMemoryStorage } from './helpers/inmemory.storage'
+import type { ImageStore } from '../src/features/records/images/files.type'
+import type { ImageFile } from '../src/features/storage/type'
+import { createTestStorage } from './helpers/sqlite'
 import { recordFixture } from './helpers/record'
 
-describe('RecordWorkflow：记录写入与图片暂存清理', () => {
-  it('保存记录时标记所属月份，并正确收敛暂存图片', async () => {
-    // 保存必须同时完成三件事：写入记录、保留远端 revision 并标 dirty、
-    // 保留记录引用的图片且清除本次表单放弃的图片。
-    const storage = new InMemoryStorage()
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 7,
-      dirty: false,
-    })
-    const referencedImage = new Blob(['referenced'])
-    const orphanImage = new Blob(['orphan'])
-    await storage.putImageBlob('image-used', referencedImage)
-    await storage.putImageBlob('image-orphan', orphanImage)
-    const workflow = createRecordWorkflow({ storage })
-
-    const record = recordFixture('record-1', '2026-08-19T10:00:00+08:00', {
-      images: ['image-used'],
-    })
-    await workflow.save(record, undefined)
-
-    await expect(storage.getRecordsInMonth('2026-08')).resolves.toEqual([record])
-    await expect(storage.getPartitionState('2026-08')).resolves.toEqual({
-      month: '2026-08',
-      remoteRevision: 7,
-      dirty: true,
-    })
-    await expect(storage.getImageBlob('image-used')).resolves.toBe(referencedImage)
-    await expect(storage.getImageBlob('image-orphan')).resolves.toBeUndefined()
-  })
-
-  it('编辑跨月时同时标记旧月与新月', async () => {
-    // 跨月编辑在云端表现为“旧月移除 + 新月写入”；两个分片都必须 dirty，
-    // 否则旧月份会永久残留修改前的记录。
-    const storage = new InMemoryStorage()
-    const previous = recordFixture('move', '2026-07-31T15:59:59.000Z')
-    const updated = { ...previous, time: new Date('2026-08-01T16:00:00.000Z') }
-    await storage.upsertRecord(previous)
-    await storage.putPartitionState({
-      month: '2026-07',
-      remoteRevision: 2,
-      dirty: false,
-    })
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 4,
-      dirty: false,
-    })
-
-    await createRecordWorkflow({ storage }).save(updated, previous.time)
-
-    await expect(storage.getRecordsInMonth('2026-07')).resolves.toEqual([])
-    await expect(storage.getRecordsInMonth('2026-08')).resolves.toEqual([updated])
-    expect((await storage.getPartitionState('2026-07'))?.dirty).toBe(true)
-    expect((await storage.getPartitionState('2026-08'))?.dirty).toBe(true)
-  })
-
-  it('删除记录时标记原月份并清理失去引用的暂存图片', async () => {
-    // 即使删除的是月份中最后一条记录，也必须把原月份标 dirty 以便上传空分片；
-    // 删除后失去引用的本地暂存图片应随即清理。
-    const storage = new InMemoryStorage()
-    const image = new Blob(['only-reference'])
-    await storage.putImageBlob('image-only', image)
-    const record = recordFixture('record-1', '2026-08-19T10:00:00+08:00', {
-      images: ['image-only'],
-    })
-    await storage.upsertRecord(record)
-    await storage.putPartitionState({
-      month: '2026-08',
-      remoteRevision: 3,
-      dirty: false,
-    })
-    const workflow = createRecordWorkflow({ storage })
-
-    await workflow.delete(record)
-
-    await expect(storage.getRecordsInMonth('2026-08')).resolves.toEqual([])
-    await expect(storage.getPartitionState('2026-08')).resolves.toEqual({
-      month: '2026-08',
-      remoteRevision: 3,
-      dirty: true,
-    })
-    await expect(storage.getImageBlob('image-only')).resolves.toBeUndefined()
-  })
+it('文件写入或引用事务失败时回收本次文件、保留草稿，并允许完整重试', async () => {
+  // 文件与 SQLite 不共享事务：中途失败必须回收已写文件，且不能改动原有记录或修改序号。
+  // 同一份草稿引用接着重试必须成功；测试分别制造磁盘阶段和外键事务阶段的失败。
+  const { storage, database } = createTestStorage()
+  const files = new Map<string, ImageFile>()
+  let failWrite = true
+  const images: ImageStore = {
+    async persist(draft) {
+      if (failWrite && draft.id === 'b') throw new Error('磁盘写入失败')
+      const image = { id: draft.id, path: 'images/' + draft.id + '.webp', mime: 'image/webp', bytes: 1, sha256: draft.id.repeat(64) }
+      files.set(image.id, image); return image
+    },
+    async remove(removed) { removed.forEach((image) => files.delete(image.id)) },
+    async source(id) { return 'file:///images/' + id },
+  }
+  const workflow = createRecordWorkflow({ storage, images })
+  const drafts = ['a', 'b'].map((id) => ({ id, token: id, url: 'content://draft/' + id, previewUrl: 'content://draft/' + id + '/preview' }))
+  try {
+    await storage.saveRecord(recordFixture('baseline', '2026-10-01T00:00:00Z'))
+    const before = await storage.inspect()
+    const record = recordFixture('new', '2026-10-02T00:00:00Z', { images: ['a', 'b'] })
+    await expect(workflow.save(record, drafts)).rejects.toThrow('磁盘')
+    expect(files.size).toBe(0)
+    expect((await storage.inspect()).sequence).toBe(before.sequence)
+    failWrite = false
+    await expect(workflow.save({ ...record, images: ['a', 'b', 'missing'] }, drafts)).rejects.toThrow()
+    expect(files.size).toBe(0)
+    expect((await storage.queryRecords()).records.map((item) => item.id)).toEqual(['baseline'])
+    expect(drafts.map((draft) => draft.token)).toEqual(['a', 'b'])
+    await workflow.save(record, drafts)
+    expect(files.size).toBe(2)
+    expect((await storage.inspect()).images).toHaveLength(2)
+  } finally { database.close() }
 })

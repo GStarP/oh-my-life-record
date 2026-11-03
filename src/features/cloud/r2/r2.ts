@@ -1,271 +1,94 @@
-/**
- * R2CloudAdapter：CloudAdapter 的 Cloudflare R2 真实实现。
- *
- * 访问方式：本地 SigV4 签名（aws4fetch），无签名服务（ADR-0001）。
- * 服务与区域由 aws4fetch 从端点主机名自动识别：
- * *.r2.cloudflarestorage.com → service s3、region auto。
- *
- * 云端对象布局（docs/cloud-storage-format.md）：
- *   manifest.json                清单（分片版本表）
- *   type-templates.json          全局类型模板集合
- *   records/YYYY-MM.json         分片（该月记录全集）
- *   images/{imageId}.webp        图片（不可变对象）
- *
- * 错误语义：
- * - 404（对象不存在）→ get* 返回 undefined；NoSuchBucket 仍抛错，不能当空云端。
- * - 分片 JSON 损坏 → getPartitionFile 返回 undefined（引擎 brokenMonths：
- *   不覆盖本地、不中止同步；同步层会把该月份记录为损坏）；
- *   解码器一律抛错（具体原因在 Error 消息里），适配器在边界 catch 后
- *   记 console.warn 并翻译成 undefined。
- * - manifest JSON 损坏 → 抛错（manifest 驱动全部同步决策，静默当空
- *   可能导致错误上传覆盖云端）。解码器消息只报具体问题，
- *   「云端 manifest.json」前缀由 getManifest 捕获处统一添加。
- * - 网络失败 → TypeError；总时限 → CloudTimeoutError；HTTP 错误 → R2HttpError。
- */
+import { withDeadline } from '../../../utils/deadline'
 import { AwsClient } from 'aws4fetch'
+import { nativeData } from '../../storage/native'
 import { CloudDataError, CloudRequestError } from '../request-error'
-import { cloudRequest } from '../request'
-import { cacheImageBlob } from '../../records/images/image-cache'
-import type { CloudAdapter, R2Config } from '../cloud.type'
-import type { TypeTemplatesFile } from '../../type-templates/type'
-import type { Manifest, PartitionFile } from '../sync/engine.type'
-import {
-  decodeManifest,
-  decodePartitionFile,
-  decodeTypeTemplatesFile,
-  encodeManifest,
-  encodePartitionFile,
-  encodeTypeTemplatesFile,
-} from './codec'
+import type { NativeFile, NetworkOptions } from '../../storage/native.type'
+import type { CloudAdapter, CloudImage, CloudSnapshot, R2Config } from '../cloud.type'
+import type { CloudTransport } from './r2.type'
 
-/** 签名 GET URL 的有效期（秒）。图片展示用：「短期」= 5 分钟（R2 默认 86400 太长）。 */
-const SIGNED_URL_EXPIRES_SECONDS = 300
+const NETWORK_TIMEOUT = 15_000
+const FILE_TRANSFER_TIMEOUT = 3 * 60_000
 
-/** ListObjectsV2 的 token 是 XML 文本；对象键另由 encoding-type=url 编码。 */
-function decodeXmlText(text: string): string {
-  return text.replace(/&(amp|lt|gt|quot|apos);/g, (_, entity: string) => {
-    return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" })[entity] ?? _
-  })
+function xml(text: string): string {
+  return text.replace(/&(amp|lt|gt|quot|apos);/g, (_, name: string) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" })[name] ?? _)
 }
 
-/**
- * R2 请求失败（非 404，或写路径 404）：携带 HTTP 状态码，
- * 供调用方分类处置（如凭证连接验证区分「凭证无效」与「云端/网络故障」，见 verify.ts）。
- */
-export class R2HttpError extends CloudRequestError {
-  constructor(
-    message: string,
-    readonly status: number,
-    /** R2 错误码（响应体 XML 的 <Code>，如 NoSuchBucket / NoSuchKey / SignatureDoesNotMatch）；无法解析时为 undefined。 */
-    readonly code: string | undefined = undefined,
-  ) {
-    super(message, status, code)
-    this.name = 'R2HttpError'
-  }
-}
 export class R2CloudAdapter implements CloudAdapter {
+  readonly namespace: string
   private readonly client: AwsClient
-  /** 桶根 URL：{endpoint}/{bucket}/（末尾带 /，便于 new URL(key, base)）。 */
-  private readonly baseUrl: string
-
-  constructor(config: R2Config) {
-    // 配置正确性不在构造期校验：设置页保存时会先做真实连接验证，
-    // 错误配置在首次请求时以签名或 HTTP 错误暴露。
-    this.client = new AwsClient({
-      accessKeyId: config.accessKeyId,
-      secretAccessKey: config.accessKeySecret,
-      // 重试由前台检查器管理；避免库内指数退避把一次连接拖成数分钟。
-      retries: 0,
+  private readonly base: URL
+  constructor(config: R2Config, private readonly transport: CloudTransport = (options) => nativeData.network(options)) {
+    const endpoint = config.endpoint.trim().replace(/\/+$/, '')
+    this.namespace = JSON.stringify([endpoint, config.bucket.trim(), 'data/'])
+    this.base = new URL(endpoint + '/' + encodeURIComponent(config.bucket.trim()) + '/')
+    this.client = new AwsClient({ accessKeyId: config.accessKeyId, secretAccessKey: config.accessKeySecret, service: 's3', retries: 0 })
+  }
+  private async request(method: string, key: string, options: Partial<NetworkOptions> = {}, headers: Record<string, string> = {}) {
+    const url = new URL(key.startsWith('?') ? key : 'data/' + key, this.base)
+    const signed = await withDeadline(this.client.sign(url.toString(), { method, headers, aws: { signQuery: true } }), NETWORK_TIMEOUT, '云端请求签名超时')
+    const timeout = options.source !== undefined || options.destination !== undefined ? FILE_TRANSFER_TIMEOUT : NETWORK_TIMEOUT
+    let response
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        response = await withDeadline(this.transport({ ...options, url: signed.url, method, headers: Object.fromEntries(signed.headers), key }), timeout, '云端请求超时')
+        if (attempt === 0 && (response.status >= 500 || response.status === 429) && !(method === 'PUT' && key === 'database.sqlite')) continue
+        break
+      } catch (error) { if (attempt === 1 || (error instanceof Error && /timeout|超时/i.test(error.message)) || (method === 'PUT' && key === 'database.sqlite')) throw error }
+    }
+    if (!response) throw new CloudDataError('未收到云端响应')
+    const code = /<Code>([^<]+)<\/Code>/.exec(response.body)?.[1]
+    if ((response.status < 200 || response.status >= 300) && !(response.status === 404 && (method === 'HEAD' || method === 'GET') && code !== 'NoSuchBucket')) throw new CloudRequestError(`云端 ${method} 失败（${response.status}）`, response.status, code)
+    return response
+  }
+  async getSnapshot(operationId?: string): Promise<CloudSnapshot | undefined> {
+    const response = await this.request('HEAD', 'database.sqlite', { operationId })
+    if (response.status === 404) return undefined
+    const revision = Number(response.headers['x-amz-meta-revision'])
+    const sha256 = response.headers['x-amz-meta-sha256']
+    const bytes = Number(response.headers['content-length'])
+    const etag = response.headers.etag
+    if (!Number.isSafeInteger(revision) || revision < 1 || !/^[a-f0-9]{64}$/.test(sha256 ?? '') || !Number.isSafeInteger(bytes) || bytes < 1 || !etag || response.headers['x-amz-meta-schema-version'] !== '1') throw new CloudDataError('云端数据库元信息不完整')
+    return { revision, sha256, bytes, etag }
+  }
+  async listImages(operationId?: string): Promise<CloudImage[]> {
+    const images: CloudImage[] = []
+    let token: string | undefined
+    const tokens = new Set<string>()
+    const paths = new Set<string>()
+    do {
+      const params = new URLSearchParams({ 'list-type': '2', prefix: 'data/images/', 'encoding-type': 'url' })
+      if (token) params.set('continuation-token', token)
+      const response = await this.request('GET', '?' + params, { operationId })
+      if (response.status !== 200 || !/<ListBucketResult[\s>]/.test(response.body)) throw new CloudDataError('无法读取云端图片集合')
+      for (const match of response.body.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
+        const key = /<Key>([\s\S]*?)<\/Key>/.exec(match[1])?.[1]
+        const size = Number(/<Size>(\d+)<\/Size>/.exec(match[1])?.[1])
+        if (!key || !Number.isSafeInteger(size)) throw new CloudDataError('云端图片清单损坏')
+        const path = decodeURIComponent(xml(key)).replace(/^data\//, '')
+        if (!/^images\/[A-Za-z0-9_-][A-Za-z0-9_.-]*$/.test(path)) throw new CloudDataError('云端图片路径不正确')
+        if (paths.has(path)) throw new CloudDataError('云端返回了重复的图片')
+        paths.add(path); images.push({ path, bytes: size })
+      }
+      token = /<NextContinuationToken>([\s\S]*?)<\/NextContinuationToken>/.exec(response.body)?.[1]
+      if (token) { token = xml(token); if (tokens.has(token) || tokens.size >= 10_000) throw new CloudDataError('云端返回了重复的分页位置'); tokens.add(token) }
+      if (/<IsTruncated>true<\/IsTruncated>/.test(response.body) && !token) throw new CloudDataError('云端分页位置缺失')
+    } while (token)
+    return images
+  }
+  async uploadImage(path: string, mime: string, operationId: string): Promise<void> {
+    await this.request('PUT', path, { source: path, operationId }, { 'Content-Type': mime })
+  }
+  async uploadSnapshot(file: NativeFile, revision: number, etag: string | undefined, operationId: string): Promise<void> {
+    await this.request('PUT', 'database.sqlite', { source: file.path, operationId }, {
+      'Content-Type': 'application/vnd.sqlite3', 'x-amz-meta-revision': String(revision),
+      'x-amz-meta-sha256': file.sha256, 'x-amz-meta-schema-version': '1',
+      ...(etag ? { 'If-Match': etag } : { 'If-None-Match': '*' }),
     })
-    const base = new URL(config.endpoint)
-    base.pathname = base.pathname.replace(/\/+$/, '') + '/' + config.bucket + '/'
-    this.baseUrl = base.toString()
   }
-
-  /** 图片对象键：images/{id}.webp。 */
-  private imageKey(imageId: string): string {
-    return 'images/' + encodeURIComponent(imageId) + '.webp'
+  async download(key: string, destination: string, sha256: string, operationId: string, etag?: string) {
+    const response = await this.request('GET', key, { destination, expectedSha256: sha256, operationId }, etag ? { 'If-Match': etag } : {})
+    if (!response.file) throw new CloudDataError('云端文件不存在')
+    return response.file
   }
-
-  /**
-   * 统一签名请求。404 放行**仅限 GET**（调用方按「对象不存在」处理——
-   * 读路径的「无此对象」是正常状态，NoSuchBucket 除外）；PUT/DELETE 的 404 一律视为错误
-   * （如桶名写错时 R2 返回 NoSuchBucket——若静默放行，写入会被误报为
-   * 成功，数据滞留本地且引擎照常置 dirty=false）。其余非 2xx 抛中文
-   * 错误（含 R2 返回的响应体摘要，便于排查）。
-   */
-  private async signedRequest(
-    method: 'GET' | 'PUT' | 'DELETE',
-    key: string,
-    body?: string | ArrayBuffer,
-    contentType?: string,
-  ): Promise<Response> {
-    const headers: Record<string, string> = {}
-    if (contentType) headers['Content-Type'] = contentType
-    return cloudRequest(async (signal) => {
-      const res = await this.client.fetch(this.baseUrl + key, { method, headers, body, signal })
-      // 在同一时限内读完响应体；仅收到 HTTP headers 不代表请求已结束。
-      const bytes = await res.arrayBuffer()
-      const detail = res.ok ? '' : new TextDecoder().decode(bytes)
-      const code = /<Code>([^<]+)<\/Code>/.exec(detail)?.[1]
-      if (!res.ok && !(res.status === 404 && method === 'GET' && code !== 'NoSuchBucket')) {
-        throw new R2HttpError(
-          'R2 ' + method + ' ' + key + ' 失败（HTTP ' + res.status + '）：' + detail.slice(0, 200),
-          res.status,
-          code,
-        )
-      }
-      return new Response([204, 205, 304].includes(res.status) ? null : bytes, {
-        status: res.status,
-        statusText: res.statusText,
-        headers: res.headers,
-      })
-    })
-  }
-
-  // ---- manifest ----
-  async getManifest(): Promise<Manifest | undefined> {
-    const res = await this.signedRequest('GET', 'manifest.json')
-    if (res.status === 404) return undefined
-    try {
-      return decodeManifest(await res.text())
-    } catch (err) {
-      // 前缀统一在此添加：解码器只报具体问题
-      throw new CloudDataError('云端 manifest.json：' + (err instanceof Error ? err.message : String(err)))
-    }
-  }
-
-  async putManifest(manifest: Manifest): Promise<void> {
-    await this.signedRequest('PUT', 'manifest.json', encodeManifest(manifest), 'application/json')
-  }
-
-  // ---- 分片文件 ----
-  async getPartitionFile(month: string): Promise<PartitionFile | undefined> {
-    const res = await this.signedRequest('GET', 'records/' + month + '.json')
-    if (res.status === 404) return undefined
-    let file: PartitionFile
-    try {
-      file = decodePartitionFile(await res.text())
-    } catch (err) {
-      // brokenMonths 语义：损坏不中止同步；具体原因仅作诊断输出
-      console.warn('云端分片 ' + month + ' 损坏：' + (err instanceof Error ? err.message : String(err)))
-      return undefined
-    }
-    // 业务校验：文件内容月份必须与请求一致（replacePartition 以 file.month
-    // 为准，错配会替换错误分片）——解码器不掺业务判断，这里把关。
-    if (file.month !== month) {
-      console.warn('云端分片 ' + month + ' 内容月份不符：' + file.month)
-      return undefined
-    }
-    return file
-  }
-
-  async putPartitionFile(file: PartitionFile): Promise<void> {
-    await this.signedRequest('PUT', 'records/' + file.month + '.json', encodePartitionFile(file), 'application/json')
-  }
-
-  // ---- 类型模板文件 ----
-  async getTypeTemplatesFile(): Promise<TypeTemplatesFile | undefined> {
-    const res = await this.signedRequest('GET', 'type-templates.json')
-    if (res.status === 404) return undefined
-    try {
-      return decodeTypeTemplatesFile(await res.text())
-    } catch (err) {
-      console.warn(
-        '云端类型模板文件损坏：' +
-          (err instanceof Error ? err.message : String(err)),
-      )
-      return undefined
-    }
-  }
-
-  async putTypeTemplatesFile(file: TypeTemplatesFile): Promise<void> {
-    await this.signedRequest(
-      'PUT',
-      'type-templates.json',
-      encodeTypeTemplatesFile(file),
-      'application/json',
-    )
-  }
-
-  // ---- 图片对象 ----
-  async putImage(imageId: string, blob: Blob): Promise<void> {
-    // aws4fetch 的签名体只接受 string/ArrayBuffer/ArrayBufferView，Blob 先取字节
-    const body = await blob.arrayBuffer()
-    await this.signedRequest(
-      'PUT',
-      this.imageKey(imageId),
-      body,
-      blob.type || 'application/octet-stream',
-    )
-    // 上传成功后暂存即会删除；尽力保留同一 Blob，避免刚上传的图片离线立即消失。
-    await cacheImageBlob(new URL(this.imageKey(imageId), this.baseUrl).toString(), blob)
-  }
-
-  async deleteImage(imageId: string): Promise<void> {
-    await this.signedRequest('DELETE', this.imageKey(imageId))
-  }
-
-  /** 列出指定前缀的全部对象，自动翻页。 */
-  private async listObjectKeys(prefix: string): Promise<string[]> {
-    const keys: string[] = []
-    let continuationToken: string | undefined
-    for (;;) {
-      const url = new URL(this.baseUrl)
-      url.searchParams.set('list-type', '2')
-      url.searchParams.set('prefix', prefix)
-      url.searchParams.set('encoding-type', 'url')
-      if (continuationToken) url.searchParams.set('continuation-token', continuationToken)
-      const res = await this.signedRequest('GET', url.search)
-      const xml = await res.text()
-      if (!/<ListBucketResult\b[^>]*>[\s\S]*<\/ListBucketResult>\s*$/.test(xml)) {
-        throw new Error('R2 对象清单无效')
-      }
-      for (const encodedKey of xml.matchAll(/<Key>([^<]+)<\/Key>/g)) {
-        const key = decodeURIComponent(decodeXmlText(encodedKey[1]))
-        if (!key.startsWith(prefix) || key.split('/').some((part) => part === '.' || part === '..')) {
-          throw new Error('R2 对象路径超出清理范围，已停止操作')
-        }
-        keys.push(key)
-      }
-      if (!/<IsTruncated>true<\/IsTruncated>/.test(xml)) break
-      const token = /<NextContinuationToken>([^<]+)<\/NextContinuationToken>/.exec(xml)
-      const nextToken = token ? decodeXmlText(token[1]) : undefined
-      if (!nextToken || nextToken === continuationToken) {
-        throw new Error('R2 对象清单分页失败')
-      }
-      continuationToken = nextToken
-    }
-    return keys
-  }
-
-  /** 列出云端全部图片对象 ID（ListObjectsV2，prefix=images/，自动翻页）。 */
-  async listImages(): Promise<string[]> {
-    return (await this.listObjectKeys('images/')).map((key) => key.endsWith('.webp')
-      ? key.slice('images/'.length, -'.webp'.length)
-      : key.slice('images/'.length))
-  }
-
-  async clearAllData(): Promise<void> {
-    // 不读取 manifest 或解析旧记录；即使旧 JSON 已过时/损坏，也能清空。
-    // 先完整列举再删除，避免边翻页边删除导致遗漏；未被 manifest 引用的文件也覆盖。
-    const [records, images] = await Promise.all([
-      this.listObjectKeys('records/'),
-      this.listObjectKeys('images/'),
-    ])
-    for (const key of [...records, ...images, 'type-templates.json', 'manifest.json']) {
-      await this.signedRequest('DELETE', key.split('/').map(encodeURIComponent).join('/'))
-    }
-  }
-
-  // ---- 签名 URL ----
-  async getSignedGetUrl(imageId: string): Promise<string> {
-    const url = new URL(this.imageKey(imageId), this.baseUrl)
-    // 显式短期过期：aws4fetch 默认 86400 秒太长；R2 在过期后拒绝该 URL
-    url.searchParams.set('X-Amz-Expires', String(SIGNED_URL_EXPIRES_SECONDS))
-    // 查询签名（signQuery）：签名进入 URL 查询参数，可直接用于 <img src>
-    // ——浏览器无法为图片请求附加 Authorization 头（CONTEXT.md「本地签名 URL」）
-    const signed = await this.client.sign(url, { aws: { signQuery: true } })
-    return signed.url
-  }
+  async deleteImage(path: string, operationId: string): Promise<void> { await this.request('DELETE', path, { operationId }) }
 }
