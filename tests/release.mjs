@@ -100,6 +100,8 @@ test('发布端到端：原子推送正确源码，附件中断保留草稿，�
   // 此测试使用真实临时 Git 仓库和本地 bare 远端，GitHub CLI 与 HTTP 被隔离替身替代，
   // 因此绝不访问真实发布接口。第一次在摘要上传时中断，预期源码/标签正确且仅保留草稿；
   // 再次审核后复用正确 APK，上传剩余摘要并发布；已发布版本必须拒绝覆盖。
+  // 按标签的 REST 接口只返回已发布版本；CLI 按版本查询还会返回有权限访问的草稿。
+  // 替身必须保留这一区别，否则会漏掉创建草稿后误判不存在、停止上传的问题。
   const { root, directory, bare, metadata, originalTag } = await fixture(t)
   const bin = resolve(directory, 'bin'), statePath = resolve(directory, 'github.json')
   await mkdir(bin)
@@ -111,8 +113,9 @@ test('发布端到端：原子推送正确源码，附件中断保留草稿，�
 import { readFileSync, writeFileSync, copyFileSync } from 'node:fs';import { basename, resolve } from 'node:path';
 const path=${JSON.stringify(statePath)},s=JSON.parse(readFileSync(path)),a=process.argv.slice(2),option=k=>a[a.indexOf(k)+1],save=()=>writeFileSync(path,JSON.stringify(s));
 if(a[0]==='auth')process.exit(0);
-if(a[0]==='api'){if(a[1]==='user')console.log('tester\\t123');else if(s.release)console.log(JSON.stringify(s.release));else{console.error('HTTP 404');process.exitCode=1}}
-else if(a[1]==='create'){s.release={draft:true,body:readFileSync(option('--notes-file'),'utf8'),assets:[],html_url:'https://example.com/v1.0.0'};save()}
+if(a[0]==='api'){if(a[1]==='user')console.log('tester\\t123');else if(s.release&&!s.release.draft)console.log(JSON.stringify(s.release));else{console.error('HTTP 404');process.exitCode=1}}
+else if(a[1]==='view'){if(s.release)console.log(JSON.stringify({isDraft:s.release.draft,body:s.release.body,assets:s.release.assets,url:s.release.html_url}));else{console.error('release not found');process.exitCode=1}}
+else if(a[1]==='create'){if(s.release)throw Error('release already exists');s.release={draft:true,body:readFileSync(option('--notes-file'),'utf8'),assets:[],html_url:'https://example.com/v1.0.0'};save()}
 else if(a[1]==='upload'){const name=basename(a[3]);if(s.failChecksum&&name.endsWith('.sha256')){s.failChecksum=false;save();console.error('simulated interruption');process.exitCode=1}else{if(s.release.assets.some(x=>x.name===name))throw Error('duplicate upload');copyFileSync(a[3],resolve(${JSON.stringify(directory)},name));s.release.assets.push({name});s.uploads.push(name);save()}}
 else if(a[1]==='download')copyFileSync(resolve(${JSON.stringify(directory)},option('--pattern')),resolve(option('--dir'),option('--pattern')));
 else if(a[1]==='edit'){s.release.draft=false;save()}

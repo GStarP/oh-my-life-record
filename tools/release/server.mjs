@@ -7,9 +7,9 @@ function html(token) {
 <style nonce="${token}">
 *{box-sizing:border-box}body{margin:0;background:#f4f5f7;color:#20232a;font:15px/1.6 system-ui}
 .layout{display:grid;grid-template-columns:680px 280px;gap:24px;width:984px;margin:40px auto;align-items:start}
-main,aside{padding:28px;background:white;border-radius:12px}h1{margin:0 0 24px;font-size:24px}h2{margin:24px 0 12px;font-size:17px}aside h2{margin-top:0}
+.sidebar{display:grid;gap:24px}main,aside{padding:28px;background:white;border-radius:12px}h1{margin:0 0 24px;font-size:24px}h2{margin:24px 0 12px;font-size:17px}aside h2{margin-top:0}
 dl{display:grid;grid-template-columns:88px 1fr;gap:10px 20px;margin:0}dt{color:#626773}dd{margin:0}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}aside pre,#progress{padding:12px;background:#f4f5f7;border-radius:8px}aside pre{font:13px/1.6 monospace}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}aside pre,#progress{padding:12px;background:#f4f5f7;border-radius:8px}#login{font:13px/1.6 monospace}
 button{padding:10px 18px;border:1px solid #d4d7dc;border-radius:8px;background:white;cursor:pointer;font:inherit}button.primary{background:#176c46;color:white;border-color:#176c46}button:disabled{opacity:.45;cursor:default}
 .actions{display:flex;gap:12px;justify-content:flex-end;margin-top:24px}.notice{margin-top:24px;padding:12px;background:#fff5db;border-radius:8px}input{margin-right:8px}
 #result{white-space:pre-wrap;overflow-wrap:anywhere}#result:empty,#link:empty{display:none}a{color:#176c46}
@@ -19,9 +19,8 @@ button{padding:10px 18px;border:1px solid #d4d7dc;border-radius:8px;background:w
 <dl><dt>版本</dt><dd id="version"></dd><dt>仓库</dt><dd id="repository"></dd><dt>目标分支</dt><dd>main</dd><dt>安装包</dt><dd id="apk"></dd><dt>大小</dt><dd id="size"></dd></dl>
 <h2>发布说明</h2><pre id="notes"></pre>
 <div id="tagWarning" class="notice" hidden><label><input type="checkbox" id="ack"><span id="tagText"></span></label></div>
-<p id="result" role="status"></p><pre id="progress" hidden></pre><p id="link"></p>
 <div class="actions"><button id="cancel">取消</button><button class="primary" id="confirm" disabled>确认发布</button></div>
-</main><aside><h2>GitHub CLI</h2><p id="auth" role="status">检查中…</p><pre id="login" hidden>gh auth login --web</pre><button id="refresh">重新检查</button></aside></div>
+</main><div class="sidebar"><aside><h2>GitHub CLI</h2><p id="auth" role="status">检查中…</p><pre id="login" hidden>gh auth login --web</pre><button id="refresh">重新检查</button></aside><aside id="publication" hidden><h2>发布状态</h2><p id="result" role="status"></p><pre id="progress" hidden></pre><p id="link"></p></aside></div></div>
 <script nonce="${token}">
 const token=${JSON.stringify(token)};
 const $=id=>document.getElementById(id);
@@ -30,13 +29,14 @@ async function api(path,body){
   const response=await fetch(path,{method:body?'POST':'GET',headers:{'X-Review-Token':token,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
   const value=await response.json();if(!response.ok)throw Error(value.error);return value;
 }
+function showResult(message){$('publication').hidden=false;$('result').textContent=message}
 function buttonState(){$('confirm').disabled=busy||!state||!auth?.ready||!!state.blocked||(state.replaceTag&&!$('ack').checked)}
 async function load(){
   try{
     state=await api('/state');const a=state.approved;
     $('version').textContent=a.tag;$('repository').textContent=state.repository;$('apk').textContent=a.apk.file;$('size').textContent=(a.apk.bytes/1024**2).toFixed(1)+' MB';$('notes').textContent=a.notes;
-    $('tagWarning').hidden=!state.replaceTag||!!state.blocked;$('tagText').textContent='将未发布的 '+a.tag+' 标签指向本次源码';$('result').textContent=state.blocked||'';buttonState();
-  }catch(error){$('result').textContent=error.message}
+    $('tagWarning').hidden=!state.replaceTag||!!state.blocked;$('tagText').textContent='将未发布的 '+a.tag+' 标签指向本次源码';if(state.blocked)showResult(state.blocked);buttonState();
+  }catch(error){showResult(error.message)}
 }
 async function checkAuth(){
   auth=undefined;$('refresh').disabled=true;$('auth').textContent='检查中…';buttonState();
@@ -46,21 +46,21 @@ async function checkAuth(){
 }
 $('ack').onchange=buttonState;$('refresh').onclick=checkAuth;
 $('cancel').onclick=async()=>{
-  try{await api('/cancel',{});busy=true;$('result').textContent='已取消';for(const id of ['confirm','cancel','refresh'])$(id).disabled=true}
-  catch(error){$('result').textContent=error.message}
+  try{await api('/cancel',{});busy=true;showResult('已取消');for(const id of ['confirm','cancel','refresh'])$(id).disabled=true}
+  catch(error){showResult(error.message)}
 };
 $('confirm').onclick=async()=>{
-  busy=true;buttonState();$('cancel').disabled=true;$('refresh').disabled=true;
+  busy=true;buttonState();$('cancel').disabled=true;$('refresh').disabled=true;showResult('发布中');
   try{await api('/confirm',{replaceTag:$('ack').checked});$('progress').hidden=false;poll()}
-  catch(error){$('result').textContent=error.message;busy=false;$('cancel').disabled=false;$('refresh').disabled=false;buttonState()}
+  catch(error){showResult(error.message);busy=false;$('cancel').disabled=false;$('refresh').disabled=false;buttonState()}
 };
 async function poll(){
   try{
     const value=await api('/progress');$('progress').textContent=value.messages.join('\n');
     if(value.status==='running')return setTimeout(poll,800);
-    $('result').textContent=value.status==='complete'?'发布完成':'发布失败：'+value.error;
+    showResult(value.status==='complete'?'发布完成':'发布失败：'+value.error);
     if(value.url){const link=document.createElement('a');link.href=value.url;link.textContent='打开 GitHub Release';link.rel='noreferrer';$('link').append(link)}
-  }catch(error){$('result').textContent=error.message}
+  }catch(error){showResult(error.message)}
 }
 load();checkAuth();</script></html>`
 }
