@@ -1,2 +1,6 @@
 <inset xmlns:android="http://schemas.android.com/apk/res/android"
-    android:drawable="@drawable/app_icon" android:inset="20%" />
+    android:drawable="@drawable/app_icon"
+    android:insetLeft="15%"
+    android:insetTop="17%"
+    android:insetRight="19%"
+    android:insetBottom="17%" />

@@ -51,4 +51,4 @@ await writeFile(resolve(output, filename + '.sha256'), `${sha256}  ${filename}\n
 await writeFile(resolve(output, 'release.json'), JSON.stringify(metadata, null, 2) + '\n')
 await writeFile(resolve(output, 'release-notes.md'), notes)
 console.log(JSON.stringify(metadata, null, 2))
-console.log('本地候选包已准备；GitHub Release 尚未发布，等待用户逐版本批准。')
+console.log('本地候选包已准备；发布须经用户逐版本审核确认。')

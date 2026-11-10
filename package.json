@@ -10,7 +10,7 @@
     "android:open": "cap open android",
     "android:build": "pnpm android:sync && cd android && ./gradlew :app:assembleDebug",
     "android:package": "node tools/package-apk.mjs",
-    "test:android": "node --test --test-concurrency=1 tests/android-native.mjs tests/android-transfer.mjs",
+    "test:android": "node --test --test-concurrency=1 tests/android-insets.mjs tests/android-native.mjs tests/android-transfer.mjs",
     "release:review": "node tools/release/review.mjs",
     "release": "pnpm android:package && pnpm release:review"
   },

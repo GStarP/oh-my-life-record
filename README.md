@@ -18,10 +18,9 @@ pnpm android:open
 
 ```sh
 pnpm test
-pnpm android:package
 ```
 
-打包只生成带版本号的本地候选产物。运行 `pnpm release:review` 打开审核页；确认后自动发布，取消则退出。每个版本发布前均须用户明确批准，见 [AGENTS.md](AGENTS.md) 和 [发布流程](docs/发布.md)。
+准备发布新版本时，先按 [发布流程](docs/发布.md#版本与构建)更新版本与安装序号，再运行 `pnpm android:package` 生成本地候选产物。`pnpm release:review` 打开审核页；确认后自动发布，取消则退出。每个版本发布前均须用户明确批准，见 [AGENTS.md](AGENTS.md)。
 
 ## 文档入口
 
